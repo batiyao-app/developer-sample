@@ -1,0 +1,19 @@
+{
+  "name": "batiyao-developer-sample",
+  "version": "1.0.0",
+  "description": "A sample app that connects to Batiyao with OAuth (PKCE) and uses every capability of the public API.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/batiyao-app/developer-sample.git"
+  },
+  "homepage": "https://developer.batiyao.com"
+}
