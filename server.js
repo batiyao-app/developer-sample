@@ -149,7 +149,7 @@ function errorPage(session, err) {
   return {
     status: status === 401 ? 401 : status >= 500 ? 502 : 200,
     html: layout(session, 'Batiyao said no', `
-<h1>${status === 402 ? 'Not enough BuckBuck' : 'Batiyao said no'}</h1>
+<h1>${status === 401 ? 'Connection ended' : err instanceof ApiError && err.outOfBalance ? 'Not enough BuckBuck' : 'Batiyao said no'}</h1>
 <p>${esc(advice)}</p>
 <p class="detail">Status ${esc(status)}: ${esc(err.message)}</p>
 ${reconnect}`),

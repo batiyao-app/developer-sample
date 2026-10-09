@@ -130,9 +130,9 @@ Discovery document:
 
 | Status | Means | What this sample does |
 |---|---|---|
-| 401 | Token invalid, expired, or the app was disconnected | Refreshes once; if that fails, asks the person to connect again |
-| 402 | Not enough BuckBuck | Says so plainly; nothing was spent; doesn't retry |
-| 403 | Permission missing or switched off, or this account may not do it (accounts of minors are restricted) | Shows the message; doesn't retry or re-ask for consent |
+| 400 | Batiyao refused what was sent: too long, a typed `#hashtag`, a rating it doesn't accept — or **not enough BuckBuck**, which comes back as `post creation failed: status 402`. The message is written for people | Shows the message; for a low balance says so plainly (nothing was spent); doesn't retry |
+| 401 | No token was sent | Asks the person to connect |
+| 403 | The token is no longer good (expired, or the person disconnected the app), **or** a permission is missing or switched off, **or** this account may not do this (accounts of minors are restricted). Batiyao doesn't say which | Tries one refresh. If the refresh fails (`invalid_grant`, "connection revoked"), the app was disconnected: asks the person to connect again. If a fresh token still gets 403, it's a permission: shows the message, doesn't re-ask for consent |
 | 429 | Too many requests | Asks the person to wait |
 
 ### Spending someone's BuckBuck

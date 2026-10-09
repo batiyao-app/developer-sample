@@ -24,6 +24,7 @@ function startMock() {
         if (!code || hash !== code.challenge || f.get('client_id') !== 'test-client') return send(400, { error: 'invalid_grant' });
         state.codes.delete(f.get('code'));
       } else if (f.get('grant_type') === 'refresh_token') {
+        if (state.connectionRevoked) return send(400, { error: 'invalid_grant', error_description: 'connection revoked' });
         if (!state.refresh.delete(f.get('refresh_token'))) return send(400, { error: 'invalid_grant' });
       } else return send(400, { error: 'unsupported_grant_type' });
       const access = `at${++state.n}`, refresh = `rt${state.n}`;
@@ -32,7 +33,9 @@ function startMock() {
     }
     if (url.pathname === '/oauth/revoke') { state.revoked.push(new URLSearchParams(raw).get('token')); return send(200, {}); }
     const token = (req.headers.authorization || '').replace('Bearer ', '');
-    if (!state.access.has(token) || state.revoked.includes(token)) return send(401, { error: 'not authenticated' });
+    if (!token) return send(401, { error: 'not authenticated' });
+    // Like Batiyao: an unknown, expired or revoked token is a 403, worded the same as a missing scope.
+    if (!state.access.has(token) || state.revoked.includes(token) || state.connectionRevoked) return send(403, { error: 'this request was denied' });
     state.lastToken = token;
     switch (`${req.method} ${url.pathname}`) {
       case 'GET /v1/profile': return send(200, wrap('profile', { id: 'me-1', username: 'asha', display_name: 'Asha', bio: null, reputation_score: 3, created_at: '2026-01-01T00:00:00Z' }));
@@ -43,7 +46,7 @@ function startMock() {
         if (url.searchParams.get('conversation_id')) return send(200, wrap('chat messages', { messages: [{ sender_id: 'me-1', content_type: 'text', body: 'hi there' }, { sender_id: 'other-22', content_type: 'image', media_name: 'cat.jpg', media_url: 'https://secret.example/cat.jpg' }] }));
         return send(200, wrap('conversations', { active: [{ id: 'conv-12345678', members: [{ user_id: 'me-1' }, { user_id: 'other-22' }] }], pending: [] }));
       case 'POST /v1/posts': {
-        if (state.balance < 1) return send(402, { error: 'INSUFFICIENT_BALANCE' });
+        if (state.balance < 1) return send(400, { error: 'post creation failed: status 402' });
         state.balance -= 1; const body = JSON.parse(raw); state.posts.push(body);
         return send(200, wrap('created post', { id: 'new-post', content: body.content, author: { username: 'asha' } }));
       }
@@ -148,6 +151,24 @@ test('the sample end to end', async (t) => {
   const before = mock.state.n;
   assert.match((await go('/profile')).text, /@asha/);
   assert.strictEqual(mock.state.n, before + 1, 'refreshed once');
+
+  // A content problem comes back as a 400 whose sentence is shown as it is.
+  mock.state.balance = 5;
+
+  // The person disconnects the app from Batiyao's settings: calls get 403, the
+  // refresh says "connection revoked", and the sample asks them to connect again.
+  mock.state.connectionRevoked = true;
+  r = await go('/profile');
+  assert.strictEqual(r.res.status, 401);
+  assert.match(r.text, /Connect again/);
+  mock.state.connectionRevoked = false;
+
+  // Connect again for the rest.
+  r = await go('/connect?scope=read:feed');
+  const auth3 = new URL(r.res.headers.get('location'));
+  mock.state.codes.set('code-3', { challenge: auth3.searchParams.get('code_challenge') });
+  await go(`/callback?code=code-3&state=${auth3.searchParams.get('state')}`);
+  assert.match((await go('/profile')).text, /@asha/);
 
   // Disconnect revokes the access token at Batiyao.
   const tokenNow = mock.state.lastToken;
