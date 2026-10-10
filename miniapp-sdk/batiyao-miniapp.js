@@ -10,13 +10,17 @@
  * It talks to the Batiyao page around your app with postMessage. Batiyao —
  * never your app — draws anything that involves the person's money or
  * account, so pay() and share() resolve only after the person has decided
- * on Batiyao's own screen.
+ * on Batiyao's own screen. The same goes for the device's photos and videos:
+ * pickImage() and pickVideo() open Batiyao's picker, and your app gets only
+ * the one the person chose, with its location and other details removed.
+ *
+ * 1.2.0 (2026-10-10): pickImage(), pickVideo() and supports().
  */
 (function (global) {
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.1.0';
+  var VERSION = '1.2.0';
   var pending = Object.create(null);
   var listeners = Object.create(null);
   var counter = 0;
@@ -72,6 +76,18 @@
     receive(e.data);
   });
 
+  // What every Batiyao has had since protocol v1, and the optional features
+  // a Batiyao from before getContext().features had. Anything newer is only
+  // there when the host lists it.
+  var CORE = ['ready', 'getContext', 'storage', 'storage.get', 'storage.set', 'storage.remove', 'storage.keys',
+    'getPurchases', 'consume', 'close', 'on', 'off', 'supports'];
+  var LEGACY_FEATURES = ['pay', 'share'];
+  var contextPromise = null;
+
+  function isWhole(n) {
+    return typeof n === 'number' && isFinite(n) && Math.floor(n) === n;
+  }
+
   function checkKey(key) {
     if (typeof key !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(key)) {
       throw makeError('INVALID_KEY', 'Storage keys are 1-128 letters, digits, "_", ".", ":" or "-".');
@@ -88,7 +104,8 @@
 
     /**
      * Who and where: { app_user_id, platform, locale, theme, version,
-     * test_mode, access }. app_user_id is the same for this person every
+     * test_mode, access, features }. features lists the optional methods this
+     * Batiyao has (e.g. 'pickImage'); an older Batiyao leaves it out. app_user_id is the same for this person every
      * time in your app, and different in every other app. Batiyao never gives
      * a mini app the person's name, contacts or location.
      */
@@ -139,6 +156,75 @@
         return Promise.reject(makeError('INVALID', 'share() needs an image, text, or both.'));
       }
       return send('share', { image: image || '', text: text });
+    },
+
+    /**
+     * Ask the person for a photo. Batiyao shows its own sheet and the device's
+     * picker; your app gets only the photo they choose, drawn again from its
+     * pixels: upright, no location, camera or time, its longer side at most
+     * max_size pixels (64-4096, default 2048; never enlarged). A PNG stays a
+     * PNG, anything else becomes a JPEG. Call it from a tap.
+     * Resolves { status: 'picked', image: Blob, type, width, height } |
+     * { status: 'cancelled' } | { status: 'unavailable' } (this person can't
+     * give photos to mini apps; Batiyao has told them why - carry on without).
+     * Check supports('pickImage') first: an older Batiyao rejects UNKNOWN_METHOD.
+     */
+    pickImage: function (options) {
+      options = options || {};
+      var params = {};
+      if (options.max_size != null) {
+        if (!isWhole(options.max_size) || options.max_size < 64 || options.max_size > 4096) {
+          return Promise.reject(makeError('INVALID', 'pickImage() max_size is a whole number from 64 to 4096.'));
+        }
+        params.max_size = options.max_size;
+      }
+      return send('pickImage', params);
+    },
+
+    /**
+     * Ask the person for a video (MP4, MOV or WebM, up to 100 MB and
+     * max_seconds long: 1-600, default 600). Batiyao shows its own sheet and
+     * the device's picker; your app gets only the video they choose, with its
+     * location, camera details and recording time removed. The picture and
+     * sound are not changed. Call it from a tap.
+     * Resolves { status: 'picked', video: Blob, type, size, duration, width,
+     * height } | { status: 'cancelled' } | { status: 'unavailable' }.
+     * Check supports('pickVideo') first: an older Batiyao rejects UNKNOWN_METHOD.
+     */
+    pickVideo: function (options) {
+      options = options || {};
+      var params = {};
+      if (options.max_seconds != null) {
+        var n = options.max_seconds;
+        if (typeof n !== 'number' || !isFinite(n) || n < 1 || n > 600) {
+          return Promise.reject(makeError('INVALID', 'pickVideo() max_seconds is a number from 1 to 600.'));
+        }
+        params.max_seconds = n;
+      }
+      return send('pickVideo', params);
+    },
+
+    /**
+     * Does the Batiyao your app is running in have this method? Resolves
+     * true or false, never rejects. Use it to show a button only where it
+     * works: supports('pickImage'). A Batiyao without getContext().features
+     * predates pickImage and pickVideo.
+     */
+    supports: function (name) {
+      if (CORE.indexOf(name) >= 0) return Promise.resolve(isFramed);
+      if (!contextPromise) {
+        contextPromise = send('getContext', {}, 10000).catch(function (e) {
+          contextPromise = null;
+          throw e;
+        });
+      }
+      return contextPromise.then(function (ctx) {
+        var f = ctx && ctx.features;
+        if (Array.isArray(f)) return f.indexOf(name) >= 0;
+        return LEGACY_FEATURES.indexOf(name) >= 0;
+      }, function () {
+        return false;
+      });
     },
 
     /**

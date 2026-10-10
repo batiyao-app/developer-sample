@@ -164,9 +164,9 @@ from the internet. You host nothing. The full guide is at
 
 | | |
 |---|---|
-| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK: one file, copy it into your app. `ready`, `getContext`, `storage`, `pay`, `share`, `getPurchases`, `consume`, `close`. |
+| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK (1.2.0): one file, copy it into your app. `ready`, `getContext`, `storage`, `pay`, `share`, `pickImage`, `pickVideo`, `supports`, `getPurchases`, `consume`, `close`. |
 | [`miniapp/wingbeat/`](miniapp/wingbeat) | The sample game: saved best score, a consumable (golden feathers), a permanent purchase (night sky), and "Share my score" (a score card drawn on a canvas, offered with `share()`). Live on Batiyao — open Mini apps and play it. |
-| [`tools/miniapp-simulator.js`](tools/miniapp-simulator.js) | A stand-in for Batiyao on your machine: same sandbox, a payment sheet from your manifest, a log of every SDK call. |
+| [`tools/miniapp-simulator.js`](tools/miniapp-simulator.js) | A stand-in for Batiyao on your machine: same sandbox, a payment sheet from your manifest, share and photo/video sheets, a log of every SDK call. |
 | [`tools/pack-miniapp.js`](tools/pack-miniapp.js) | Checks the folder against Batiyao's upload rules and zips it. |
 
 ```bash
@@ -182,7 +182,7 @@ Upload the zip on your app's page and press **Test**: that runs your version
 exactly as people will see it, with payments that move nothing. An admin
 reviews each version; if nobody acts within an hour it goes live by itself.
 
-Three rules that shape the code:
+The rules that shape the code:
 
 - **Bundle everything, with relative paths.** Nothing outside the folder
   loads: no CDN, no remote font, no `fetch` to another host.
@@ -191,6 +191,25 @@ Three rules that shape the code:
 - **Batiyao draws the share sheet too.** `Batiyao.share({ image: canvas, text })`
   from a tap; the person picks story, post or chat and decides. Your app only
   hears that the sheet closed — never reward or require sharing.
+- **Photos and videos come from Batiyao's picker.** A file input in your
+  app opens nothing. Call `Batiyao.pickImage({ max_size })` or
+  `Batiyao.pickVideo({ max_seconds })` from a tap: Batiyao shows its own
+  sheet and the device's picker, and your app gets only the file the person
+  chose, as a `Blob`, with its location, camera and time removed. The answer
+  is `{ status: 'picked', … }`, `'cancelled'` or `'unavailable'` (a child
+  whose guardian hasn't allowed it); carry on in every case. An older
+  Batiyao doesn't have these calls, so show the button only when
+  `await Batiyao.supports('pickImage')` is true. In the simulator, tick
+  "unavailable" (or open `/?pick=unavailable`) to try that answer.
+
+  ```js
+  if (await Batiyao.supports('pickImage')) button.hidden = false;
+  button.onclick = async () => {
+    const r = await Batiyao.pickImage({ max_size: 1024 });
+    if (r.status !== 'picked') return;               // cancelled or unavailable
+    img.src = URL.createObjectURL(r.image);           // or createImageBitmap(r.image)
+  };
+  ```
 - **Credit, save, then consume.** Check `getPurchases()` at start-up and
   credit anything new before `consume()`, so nothing is lost if the app
   closes mid-way (see `syncPurchases` in [game.js](miniapp/wingbeat/game.js)).
@@ -206,8 +225,9 @@ the sign-in with PKCE verified, every page, escaping of user content, the
 confirm-before-spending rule, a 402, token refresh, media and story upload,
 and Disconnect. No network access or Batiyao account is needed. The mini app
 tests check Wingbeat against the upload rules, that remote and root-relative
-references are refused, the packer's zip, and that the simulator serves the
-game sealed off.
+references are refused, the packer's zip, that the simulator serves the game
+sealed off and offers the picker, and the SDK's option checks and
+`supports()` (including what an older Batiyao without `features` has).
 
 ## Links
 

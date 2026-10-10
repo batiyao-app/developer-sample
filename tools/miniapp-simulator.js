@@ -7,8 +7,16 @@
 // Open http://localhost:3100. Your app runs in a sandboxed frame with the
 // same rules Batiyao uses: no origin, nothing outside the folder, no network.
 // The page around it answers the SDK like Batiyao does — saved data, a
-// payment sheet drawn from your manifest, purchases, consume — and logs
-// every call. Nothing here talks to Batiyao, and no BuckBuck moves.
+// payment sheet drawn from your manifest, purchases, consume, a share sheet
+// and a photo/video picker — and logs every call. Nothing here talks to
+// Batiyao, and no BuckBuck moves.
+//
+// Picking: the simulator draws a photo again on a canvas like Batiyao does
+// (upright, scaled, PNG stays PNG, else JPEG), but passes a video through as
+// it is. Batiyao also removes a video's location, camera details and time;
+// the simulator doesn't. To try the "unavailable" answer (a child whose
+// guardian hasn't allowed photos and videos), use the switch on the page or
+// open http://localhost:3100/?pick=unavailable.
 //
 // It is a convenience, not the judge: before you upload, test on Batiyao
 // itself (Built by me → your app → Test), which runs the real host.
@@ -29,8 +37,18 @@ const TYPES = {
   ttf: 'font/ttf', otf: 'font/otf', wasm: 'application/wasm',
 };
 
-// Batiyao removes these before your code runs (CSP can't stop WebRTC).
-const GUARD = '<script>(function(){["RTCPeerConnection","webkitRTCPeerConnection","RTCDataChannel"].forEach(function(k){try{delete window[k]}catch(e){}})})();</script>';
+// Batiyao removes these before your code runs (CSP can't stop WebRTC). It
+// also keeps the device's files away from your app except through
+// pickImage()/pickVideo(): no file chooser opens from your page, and
+// input.files is always empty. (Batiyao's own guard does more; this is the
+// part you'd notice.)
+const GUARD = '<script>(function(){["RTCPeerConnection","webkitRTCPeerConnection","RTCDataChannel"].forEach(function(k){try{delete window[k]}catch(e){}});' +
+  'var isF=function(el){return el instanceof HTMLInputElement&&String(el.type).toLowerCase()==="file"};' +
+  'var isFL=function(el){return isF(el)||(el instanceof HTMLLabelElement&&isF(el.control))};' +
+  'try{var d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"files");Object.defineProperty(HTMLInputElement.prototype,"files",{configurable:false,get:function(){return isF(this)?null:d.get.call(this)},set:function(){}})}catch(e){}' +
+  'try{var ck=HTMLElement.prototype.click;Object.defineProperty(HTMLElement.prototype,"click",{configurable:false,writable:false,value:function(){if(isFL(this))return;return ck.apply(this,arguments)}})}catch(e){}' +
+  'window.addEventListener("click",function(e){var t=e.target;if(!(t instanceof Element))return;var l=t.closest("label");if(isFL(t)||(l&&isFL(l)))e.preventDefault()},true)' +
+  '})();</script>';
 
 function fileHeaders(base) {
   return {
@@ -79,6 +97,13 @@ const HOST_PAGE = (manifest) => `<!doctype html>
     <p class="note">In the simulator nothing is posted. On Batiyao, your app is never told whether the person shared.</p>
     <div class="row"><button id="sh-cancel">Cancel</button><button id="sh-ok" class="pay">Share</button></div>
   </div></div>
+  <div id="pick-sheet" class="sheetlike"><div class="card">
+    <p><b id="pk-title"></b><br><small>The sheet Batiyao draws: only the file the person chooses goes to your app</small></p>
+    <p id="pk-body" class="note"></p>
+    <p id="pk-problem" style="color:#b91c1c;display:none"></p>
+    <div class="row"><button id="pk-cancel">Cancel</button><button id="pk-choose" class="pay"></button></div>
+    <input id="pk-input" type="file" style="display:none">
+  </div></div>
   <div id="sheet"><div class="card">
     <p><b id="s-title"></b><br><small>Made by @you · this is the sheet Batiyao draws</small></p>
     <dl><div><dt>You get</dt><dd id="s-statement"></dd></div><div><dt><b>Total</b></dt><dd><b id="s-amount"></b></dd></div></dl>
@@ -86,7 +111,7 @@ const HOST_PAGE = (manifest) => `<!doctype html>
     <div class="row"><button id="s-cancel">Cancel</button><button id="s-pay" class="pay">Pay</button></div>
   </div></div>
 </div>
-<div><div id="tools"><button id="clear-storage">Clear saved data</button><button id="clear-purchases">Clear purchases</button><button id="visibility">Send visibility: hidden, then visible</button></div><div id="log"></div></div>
+<div><div id="tools"><button id="clear-storage">Clear saved data</button><button id="clear-purchases">Clear purchases</button><button id="visibility">Send visibility: hidden, then visible</button><label><input type="checkbox" id="pick-unavailable"> Photos and videos: unavailable (a child without the guardian's switch)</label></div><div id="log"></div></div>
 <script>
 const MANIFEST = ${JSON.stringify(manifest).replace(/</g, '\\u003c')};
 const frame = document.getElementById('app');
@@ -98,6 +123,9 @@ function log(text, cls) { const d = document.createElement('div'); if (cls) d.cl
 function reply(id, result, error) { frame.contentWindow.postMessage(error ? { batiyao: 1, id, error } : { batiyao: 1, id, result }, '*'); log((error ? '✗ ' + error.code + ' ' : '← ') + id + ' ' + JSON.stringify(error ? error.message : result), error ? 'err' : ''); }
 let paying = null;
 let sharing = null;
+let picking = null;
+const FEATURES = ['pay', 'share', 'pickImage', 'pickVideo'];
+if (new URLSearchParams(location.search).get('pick') === 'unavailable') document.getElementById('pick-unavailable').checked = true;
 const KEYRE = /^[A-Za-z0-9_.:-]{1,128}$/;
 function handle(m) {
   log('→ ' + m.method + ' ' + JSON.stringify(m.params || {}));
@@ -107,7 +135,7 @@ function handle(m) {
   const bad = (code, message) => reply(m.id, null, { code, message });
   switch (m.method) {
     case 'ready': return reply(m.id, {});
-    case 'getContext': return reply(m.id, { app_user_id: 'simulator-user', platform: 'web', locale: navigator.language, theme: 'light', version: MANIFEST.version, test_mode: true, access: { type: MANIFEST.access.type, active: true } });
+    case 'getContext': return reply(m.id, { app_user_id: 'simulator-user', platform: 'web', locale: navigator.language, theme: 'light', version: MANIFEST.version, test_mode: true, access: { type: MANIFEST.access.type, active: true }, features: FEATURES });
     case 'storage.get': if (!KEYRE.test(p.key)) return bad('INVALID_KEY', 'bad key'); return reply(m.id, { value: storage[p.key] ?? null });
     case 'storage.set':
       if (!KEYRE.test(p.key)) return bad('INVALID_KEY', 'bad key');
@@ -123,7 +151,7 @@ function handle(m) {
       pu.consumed_at = new Date().toISOString(); save(':purchases', purchases); return reply(m.id, { consumed: true });
     }
     case 'pay': {
-      if (paying || sharing) return bad('BUSY', 'Batiyao is already showing a sheet.');
+      if (paying || sharing || picking) return bad('BUSY', 'Batiyao is already showing a sheet.');
       if (navigator.userActivation && !navigator.userActivation.isActive) return bad('NEEDS_TAP', 'Call pay() from a tap or click.');
       const pr = (MANIFEST.products || []).find((x) => x.id === p.product);
       if (!pr) return bad('NO_SUCH_PRODUCT', "This app doesn't sell that.");
@@ -136,7 +164,7 @@ function handle(m) {
       return;
     }
     case 'share': {
-      if (paying || sharing) return bad('BUSY', 'Batiyao is already showing a sheet.');
+      if (paying || sharing || picking) return bad('BUSY', 'Batiyao is already showing a sheet.');
       if (navigator.userActivation && !navigator.userActivation.isActive) return bad('NEEDS_TAP', 'Call share() from a tap or click.');
       const img = typeof p.image === 'string' ? p.image : '';
       const text = typeof p.text === 'string' ? p.text : '';
@@ -152,6 +180,23 @@ function handle(m) {
       if (img) el.src = img;
       document.getElementById('sh-text').textContent = text;
       document.getElementById('share-sheet').style.display = 'flex';
+      return;
+    }
+    case 'pickImage':
+    case 'pickVideo': {
+      const image = m.method === 'pickImage';
+      if (paying || sharing || picking) return bad('BUSY', 'Batiyao is already showing a sheet.');
+      let limit;
+      if (image) {
+        limit = p.max_size === undefined ? 2048 : p.max_size;
+        if (!Number.isInteger(limit) || limit < 64 || limit > 4096) return bad('INVALID', 'pickImage() max_size is a whole number from 64 to 4096.');
+      } else {
+        limit = p.max_seconds === undefined ? 600 : p.max_seconds;
+        if (typeof limit !== 'number' || !Number.isFinite(limit) || limit < 1 || limit > 600) return bad('INVALID', 'pickVideo() max_seconds is a number from 1 to 600.');
+      }
+      if (navigator.userActivation && !navigator.userActivation.isActive) return bad('NEEDS_TAP', 'Call ' + m.method + '() from a tap or click.');
+      picking = { id: m.id, image, limit };
+      openPick();
       return;
     }
     case 'close': reply(m.id, {}); log('the app asked to close', 'ev'); return;
@@ -177,6 +222,99 @@ function endShare(how) {
   reply(id, {});
 }
 document.getElementById('sh-ok').onclick = () => endShare('share');
+// --- the picker sheet ---
+function openPick() {
+  const noun = picking.image ? 'photo' : 'video';
+  const unavailable = document.getElementById('pick-unavailable').checked;
+  picking.unavailable = unavailable;
+  document.getElementById('pk-title').textContent = MANIFEST.name + ' asks for a ' + noun;
+  document.getElementById('pk-body').textContent = unavailable
+    ? 'A guardian needs to allow giving photos and videos to mini apps for this account. (Simulated: your app will hear "unavailable".)'
+    : 'Only the ' + noun + ' you choose goes to the app. Batiyao removes where it was taken, the camera and the time first.' + (picking.image ? '' : ' (The simulator passes videos through unchanged.)');
+  document.getElementById('pk-choose').style.display = unavailable ? 'none' : '';
+  document.getElementById('pk-choose').textContent = 'Choose a ' + noun;
+  document.getElementById('pk-cancel').textContent = unavailable ? 'Close' : 'Cancel';
+  document.getElementById('pk-problem').style.display = 'none';
+  const input = document.getElementById('pk-input');
+  input.accept = picking.image ? 'image/*' : 'video/mp4,video/quicktime,video/webm,.mp4,.m4v,.mov,.webm';
+  document.getElementById('pick-sheet').style.display = 'flex';
+}
+function endPick(result) {
+  document.getElementById('pick-sheet').style.display = 'none';
+  const pk = picking; picking = null;
+  frame.contentWindow.postMessage({ batiyao: 1, id: pk.id, result }, '*');
+  const shown = Object.assign({}, result);
+  if (shown.image) shown.image = 'Blob(' + shown.image.size + ' bytes)';
+  if (shown.video) shown.video = 'Blob(' + shown.video.size + ' bytes)';
+  log('← ' + pk.id + ' ' + JSON.stringify(shown));
+}
+function pickProblem(message) {
+  const el = document.getElementById('pk-problem');
+  el.textContent = message; el.style.display = 'block';
+  document.getElementById('pk-choose').textContent = 'Choose another ' + (picking.image ? 'photo' : 'video');
+}
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Batiyao can't open this picture. Choose another one.")); };
+    img.src = url;
+  });
+}
+async function prepareImage(file, max) {
+  if (!/^image\\//.test(file.type) && !/\\.(jpe?g|png|webp|gif|heic|heif|avif|bmp)$/i.test(file.name)) throw new Error("That isn't a picture. Choose a photo.");
+  if (file.size > 50 * 1024 * 1024) throw new Error('This picture is over 50 MB. Choose a smaller one.');
+  const img = await loadImage(file);
+  const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+  const width = Math.max(1, Math.round(img.naturalWidth * scale)), height = Math.max(1, Math.round(img.naturalHeight * scale));
+  const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const png = file.type === 'image/png' || /\\.png$/i.test(file.name);
+  if (!png) { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, width, height); }
+  ctx.drawImage(img, 0, 0, width, height);
+  const blob = (type, q) => new Promise((res) => canvas.toBlob(res, type, q));
+  if (png) {
+    const out = await blob('image/png');
+    if (out && out.size <= 10 * 1024 * 1024) return { status: 'picked', image: out, type: 'image/png', width, height };
+    ctx.globalCompositeOperation = 'destination-over'; ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, width, height);
+  }
+  return { status: 'picked', image: await blob('image/jpeg', 0.9), type: 'image/jpeg', width, height };
+}
+function videoFacts(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement('video'); v.preload = 'metadata'; v.muted = true;
+    v.onloadedmetadata = () => { URL.revokeObjectURL(url); resolve({ duration: v.duration, width: v.videoWidth, height: v.videoHeight }); };
+    v.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Batiyao can't play this video here, so the app couldn't either. Choose another one.")); };
+    v.src = url;
+  });
+}
+async function prepareVideo(file, maxSeconds) {
+  let type = null;
+  if (file.type === 'video/mp4' || /\\.(mp4|m4v)$/i.test(file.name)) type = 'video/mp4';
+  else if (file.type === 'video/quicktime' || /\\.mov$/i.test(file.name)) type = 'video/quicktime';
+  else if (file.type === 'video/webm' || /\\.webm$/i.test(file.name)) type = 'video/webm';
+  if (!type) throw new Error('Choose an MP4, MOV or WebM video.');
+  if (file.size > 100 * 1024 * 1024) throw new Error('This video is over 100 MB. Choose a shorter one.');
+  const f = await videoFacts(file);
+  if (!Number.isFinite(f.duration) || f.duration <= 0) throw new Error("Batiyao can't tell how long this video is. Choose another one.");
+  if (f.duration > maxSeconds + 0.5) throw new Error('This app takes videos up to ' + maxSeconds + ' seconds long. Choose a shorter one.');
+  // Passed through unchanged here. Batiyao removes the video's metadata.
+  const video = new Blob([file], { type });
+  return { status: 'picked', video, type, size: video.size, duration: Math.round(f.duration * 1000) / 1000, width: f.width, height: f.height };
+}
+document.getElementById('pk-choose').onclick = () => { const i = document.getElementById('pk-input'); i.value = ''; i.click(); };
+document.getElementById('pk-cancel').onclick = () => endPick({ status: picking.unavailable ? 'unavailable' : 'cancelled' });
+document.getElementById('pk-input').onchange = async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file || !picking) return;
+  try {
+    endPick(picking.image ? await prepareImage(file, picking.limit) : await prepareVideo(file, picking.limit));
+  } catch (err) {
+    pickProblem(err.message);
+  }
+};
 document.getElementById('sh-cancel').onclick = () => endShare('cancel');
 document.getElementById('reload').onclick = () => { frame.src = frame.src; };
 document.getElementById('clear-storage').onclick = () => { save(':storage', {}); log('saved data cleared', 'ev'); };
