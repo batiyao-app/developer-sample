@@ -106,6 +106,37 @@
 
   function say(text) { $('message').textContent = text; }
 
+  // ---------------------------------------------------------------- share --
+
+  // A score card the person may post or put in their story. Batiyao shows
+  // its own sheet and the person decides; the game is never told whether
+  // they shared, and gives nothing for it (Batiyao's rules forbid rewarding
+  // or requiring a share).
+  function shareScore() {
+    var card = document.createElement('canvas');
+    card.width = 720;
+    card.height = 1280;
+    var c = card.getContext('2d');
+    var g = c.createLinearGradient(0, 0, 0, card.height);
+    g.addColorStop(0, state.night ? '#0b1640' : '#7dd3fc');
+    g.addColorStop(1, state.night ? '#312e81' : '#e0f2fe');
+    c.fillStyle = g;
+    c.fillRect(0, 0, card.width, card.height);
+    c.fillStyle = state.night ? '#f8fafc' : '#0f172a';
+    c.textAlign = 'center';
+    c.font = 'bold 72px system-ui, sans-serif';
+    c.fillText('Wingbeat', 360, 300);
+    c.font = 'bold 220px system-ui, sans-serif';
+    c.fillText(String(state.score), 360, 660);
+    c.font = '48px system-ui, sans-serif';
+    c.fillText(state.score === 1 ? 'gap' : 'gaps', 360, 740);
+    c.fillText('Best: ' + state.best, 360, 860);
+    Batiyao.share({
+      image: card,
+      text: 'I flew through ' + state.score + (state.score === 1 ? ' gap' : ' gaps') + ' in Wingbeat. Can you beat it?'
+    }).catch(function (e) { console.warn('share', e.code); });
+  }
+
   // ---------------------------------------------------------------- game --
 
   function reset() {
@@ -252,6 +283,7 @@
   $('continue').addEventListener('click', keepFlying);
   $('buy-feathers').addEventListener('click', function (e) { buy('golden_feathers', e.currentTarget); });
   $('buy-night').addEventListener('click', function (e) { buy('night_sky', e.currentTarget); });
+  $('share').addEventListener('click', shareScore);
 
   Batiyao.on('theme', function () { /* Wingbeat keeps its own sky */ });
 

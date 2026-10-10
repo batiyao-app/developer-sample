@@ -9,14 +9,14 @@
  *
  * It talks to the Batiyao page around your app with postMessage. Batiyao —
  * never your app — draws anything that involves the person's money or
- * account, so pay() resolves only after the person has decided on
- * Batiyao's own screen.
+ * account, so pay() and share() resolve only after the person has decided
+ * on Batiyao's own screen.
  */
 (function (global) {
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.0.0';
+  var VERSION = '1.1.0';
   var pending = Object.create(null);
   var listeners = Object.create(null);
   var counter = 0;
@@ -109,6 +109,36 @@
         return Promise.reject(makeError('INVALID', 'pay() needs { product: "<id from manifest.json>" }.'));
       }
       return send('pay', { product: options.product });
+    },
+
+    /**
+     * Offer the person something to share as a post or story: a picture your
+     * app made (a <canvas> or a PNG/JPEG data: URL, up to 6 MB, 64-4096 px a
+     * side) and suggested words (up to 380 characters; no @tags, #hashtags
+     * or links). Batiyao shows its own sheet; the person picks Story or Post,
+     * may change the words, and decides. Call it from a tap.
+     * Resolves {} when the sheet closes. On purpose, your app is never told
+     * whether the person shared: never reward sharing or require it.
+     */
+    share: function (options) {
+      options = options || {};
+      var image = options.image;
+      if (image && typeof image === 'object' && typeof image.toDataURL === 'function') {
+        try { image = image.toDataURL('image/png'); } catch (e) {
+          return Promise.reject(makeError('INVALID', 'That canvas can\'t be read.'));
+        }
+      }
+      if (image != null && (typeof image !== 'string' || !/^data:image\/(png|jpeg);base64,/.test(image))) {
+        return Promise.reject(makeError('INVALID', 'share() image must be a <canvas> or a PNG/JPEG data: URL.'));
+      }
+      var text = options.text == null ? '' : options.text;
+      if (typeof text !== 'string' || text.length > 380) {
+        return Promise.reject(makeError('INVALID', 'share() text is a string of at most 380 characters.'));
+      }
+      if (!image && !text) {
+        return Promise.reject(makeError('INVALID', 'share() needs an image, text, or both.'));
+      }
+      return send('share', { image: image || '', text: text });
     },
 
     /**

@@ -164,8 +164,8 @@ from the internet. You host nothing. The full guide is at
 
 | | |
 |---|---|
-| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK: one file, copy it into your app. `ready`, `getContext`, `storage`, `pay`, `getPurchases`, `consume`, `close`. |
-| [`miniapp/wingbeat/`](miniapp/wingbeat) | The sample game: saved best score, a consumable (golden feathers) and a permanent purchase (night sky). Live on Batiyao — open Mini apps and play it. |
+| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK: one file, copy it into your app. `ready`, `getContext`, `storage`, `pay`, `share`, `getPurchases`, `consume`, `close`. |
+| [`miniapp/wingbeat/`](miniapp/wingbeat) | The sample game: saved best score, a consumable (golden feathers), a permanent purchase (night sky), and "Share my score" (a score card drawn on a canvas, offered with `share()`). Live on Batiyao — open Mini apps and play it. |
 | [`tools/miniapp-simulator.js`](tools/miniapp-simulator.js) | A stand-in for Batiyao on your machine: same sandbox, a payment sheet from your manifest, a log of every SDK call. |
 | [`tools/pack-miniapp.js`](tools/pack-miniapp.js) | Checks the folder against Batiyao's upload rules and zips it. |
 
@@ -188,6 +188,9 @@ Three rules that shape the code:
   loads: no CDN, no remote font, no `fetch` to another host.
 - **Batiyao draws the payment sheet, not you.** Call `Batiyao.pay({ product })`
   from a tap; the price and wording come from your reviewed manifest.
+- **Batiyao draws the share sheet too.** `Batiyao.share({ image: canvas, text })`
+  from a tap; the person picks story, post or chat and decides. Your app only
+  hears that the sheet closed — never reward or require sharing.
 - **Credit, save, then consume.** Check `getPurchases()` at start-up and
   credit anything new before `consume()`, so nothing is lost if the app
   closes mid-way (see `syncPurchases` in [game.js](miniapp/wingbeat/game.js)).

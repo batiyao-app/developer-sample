@@ -75,7 +75,10 @@ test('the simulator serves the game sealed off', async () => {
   await new Promise((r) => server.once('listening', r));
   try {
     const host = await fetch('http://127.0.0.1:31099/');
-    assert.match(await host.text(), /sandbox="allow-scripts allow-forms"/);
+    const html = await host.text();
+    assert.match(html, /sandbox="allow-scripts allow-forms"/);
+    // The page's script is built inside a template string; it must still parse.
+    new (require('node:vm').Script)(html.split('<script>')[1].split('</script>')[0]);
     const page = await fetch('http://127.0.0.1:31099/app/index.html');
     assert.match(page.headers.get('content-security-policy'), /^sandbox allow-scripts allow-forms; default-src 'none'/);
     assert.match(await page.text(), /^<!doctype html><script>/i);

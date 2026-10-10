@@ -58,8 +58,11 @@ const HOST_PAGE = (manifest) => `<!doctype html>
   iframe{flex:1;border:0;width:100%}
   #log{overflow:auto;padding:12px;font:12px ui-monospace,monospace;white-space:pre-wrap}
   #log .err{color:#fca5a5} #log .ev{color:#93c5fd}
-  #sheet{position:absolute;inset:0;background:rgba(0,0,0,.5);display:none;align-items:flex-end}
-  #sheet .card{background:#fff;color:#0f172a;width:100%;padding:16px;border-radius:16px 16px 0 0}
+  #sheet,.sheetlike{position:absolute;inset:0;background:rgba(0,0,0,.5);display:none;align-items:flex-end}
+  #sheet .card,.sheetlike .card{background:#fff;color:#0f172a;width:100%;padding:16px;border-radius:16px 16px 0 0}
+  .sheetlike .note{font-size:12px;background:#fffbeb;padding:8px;border-radius:8px;margin:10px 0}
+  .sheetlike button{padding:10px;border-radius:8px;border:1px solid #cbd5e1;font:inherit;cursor:pointer}
+  .sheetlike .pay{background:#2563eb;color:#fff;border-color:#2563eb} .sheetlike .row{display:grid;grid-template-columns:1fr 1.4fr;gap:8px}
   #sheet dl div{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #f1f5f9}
   #sheet dt{color:#64748b} #sheet .note{font-size:12px;background:#fffbeb;padding:8px;border-radius:8px;margin:10px 0}
   #sheet button{padding:10px;border-radius:8px;border:1px solid #cbd5e1;font:inherit;cursor:pointer}
@@ -69,6 +72,13 @@ const HOST_PAGE = (manifest) => `<!doctype html>
 <div id="stage">
   <div id="bar"><b>${manifest.name.replace(/[<&]/g, '')}</b><small>SIMULATOR</small><button id="reload">Reload</button></div>
   <iframe id="app" sandbox="allow-scripts allow-forms" src="/app/${manifest.entry || 'index.html'}"></iframe>
+  <div id="share-sheet" class="sheetlike"><div class="card">
+    <p><b>Share from ${manifest.name.replace(/[<&]/g, '')}</b><br><small>The sheet Batiyao draws: the person picks Story or Post and may change the words</small></p>
+    <img id="sh-img" alt="" style="max-width:100%;max-height:40vh;display:none;border:1px solid #e2e8f0;border-radius:8px">
+    <p id="sh-text" style="white-space:pre-wrap"></p>
+    <p class="note">In the simulator nothing is posted. On Batiyao, your app is never told whether the person shared.</p>
+    <div class="row"><button id="sh-cancel">Cancel</button><button id="sh-ok" class="pay">Share</button></div>
+  </div></div>
   <div id="sheet"><div class="card">
     <p><b id="s-title"></b><br><small>Made by @you · this is the sheet Batiyao draws</small></p>
     <dl><div><dt>You get</dt><dd id="s-statement"></dd></div><div><dt><b>Total</b></dt><dd><b id="s-amount"></b></dd></div></dl>
@@ -87,6 +97,7 @@ const save = (k, v) => localStorage.setItem(KEY + k, JSON.stringify(v));
 function log(text, cls) { const d = document.createElement('div'); if (cls) d.className = cls; d.textContent = new Date().toLocaleTimeString() + '  ' + text; logEl.prepend(d); }
 function reply(id, result, error) { frame.contentWindow.postMessage(error ? { batiyao: 1, id, error } : { batiyao: 1, id, result }, '*'); log((error ? '✗ ' + error.code + ' ' : '← ') + id + ' ' + JSON.stringify(error ? error.message : result), error ? 'err' : ''); }
 let paying = null;
+let sharing = null;
 const KEYRE = /^[A-Za-z0-9_.:-]{1,128}$/;
 function handle(m) {
   log('→ ' + m.method + ' ' + JSON.stringify(m.params || {}));
@@ -112,7 +123,7 @@ function handle(m) {
       pu.consumed_at = new Date().toISOString(); save(':purchases', purchases); return reply(m.id, { consumed: true });
     }
     case 'pay': {
-      if (paying) return bad('BUSY', 'Batiyao is already showing a payment.');
+      if (paying || sharing) return bad('BUSY', 'Batiyao is already showing a sheet.');
       if (navigator.userActivation && !navigator.userActivation.isActive) return bad('NEEDS_TAP', 'Call pay() from a tap or click.');
       const pr = (MANIFEST.products || []).find((x) => x.id === p.product);
       if (!pr) return bad('NO_SUCH_PRODUCT', "This app doesn't sell that.");
@@ -122,6 +133,25 @@ function handle(m) {
       document.getElementById('s-statement').textContent = pr.statement;
       document.getElementById('s-amount').textContent = pr.price + ' BuckBuck';
       document.getElementById('sheet').style.display = 'flex';
+      return;
+    }
+    case 'share': {
+      if (paying || sharing) return bad('BUSY', 'Batiyao is already showing a sheet.');
+      if (navigator.userActivation && !navigator.userActivation.isActive) return bad('NEEDS_TAP', 'Call share() from a tap or click.');
+      const img = typeof p.image === 'string' ? p.image : '';
+      const text = typeof p.text === 'string' ? p.text : '';
+      if (img && !/^data:image\\/(png|jpeg);base64,/.test(img)) return bad('INVALID_IMAGE', 'The image must be a PNG or JPEG data: URL.');
+      if (text.length > 380) return bad('INVALID_TEXT', 'Suggested text is at most 380 characters.');
+      if (/(^|[^\\p{L}\\p{N}_])@[\\p{L}\\p{N}_]/u.test(text)) return bad('INVALID_TEXT', 'Suggested text can\\'t tag people (@).');
+      if (/(^|[^\\p{L}\\p{N}_&])#[\\p{L}\\p{N}_]/u.test(text)) return bad('INVALID_TEXT', 'Suggested text can\\'t contain hashtags (#).');
+      if (/(https?:\\/\\/|www\\.)/i.test(text)) return bad('INVALID_TEXT', 'Suggested text can\\'t contain links.');
+      if (!img && !text) return bad('INVALID', 'share() needs an image, text, or both.');
+      sharing = m.id;
+      const el = document.getElementById('sh-img');
+      el.style.display = img ? 'block' : 'none';
+      if (img) el.src = img;
+      document.getElementById('sh-text').textContent = text;
+      document.getElementById('share-sheet').style.display = 'flex';
       return;
     }
     case 'close': reply(m.id, {}); log('the app asked to close', 'ev'); return;
@@ -140,6 +170,14 @@ function endPay(result) {
 }
 document.getElementById('s-pay').onclick = () => endPay({ status: 'paid' });
 document.getElementById('s-cancel').onclick = () => endPay({ status: 'cancelled' });
+function endShare(how) {
+  document.getElementById('share-sheet').style.display = 'none';
+  const id = sharing; sharing = null;
+  log('the person chose: ' + how + ' (your app only hears that the sheet closed)', 'ev');
+  reply(id, {});
+}
+document.getElementById('sh-ok').onclick = () => endShare('share');
+document.getElementById('sh-cancel').onclick = () => endShare('cancel');
 document.getElementById('reload').onclick = () => { frame.src = frame.src; };
 document.getElementById('clear-storage').onclick = () => { save(':storage', {}); log('saved data cleared', 'ev'); };
 document.getElementById('clear-purchases').onclick = () => { save(':purchases', []); log('purchases cleared', 'ev'); };
