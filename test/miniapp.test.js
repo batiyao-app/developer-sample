@@ -261,7 +261,11 @@ test('a full store replaces what the app marked replaceable, in order', () => {
 test('nicknames: what an adult may type, and what a child picks from', () => {
   assert.deepStrictEqual(social.checkNickname('  Ana   B  '), { nickname: 'Ana B' });
   assert.deepStrictEqual(social.checkNickname('Zoë_9.x-y'), { nickname: 'Zoë_9.x-y' });
-  for (const bad of ['ab', 'x'.repeat(21), '@ana', 'ana#1', 'www.ana', 'ana.com', 'http ana', 'ana 12345', '9 8 7 6 5 x',
+  // Any script: Burmese, Chinese (two characters), Hindi, Persian with a joiner, Thai.
+  for (const ok of ['မောင်မောင်ဦး', '小明', 'राहुल', 'علی\u200cرضا', 'สมชาย ใจดี']) {
+    assert.ok(social.checkNickname(ok).nickname, ok);
+  }
+  for (const bad of ['a', 'x'.repeat(21), '@ana', 'ana#1', 'www.ana', 'ana.com', 'http ana', 'ana 12345', '9 8 7 6 5 x',
     'BatiyaoFan', 'the admin', 'R3tard!', 'f.a.g.g.o.t', 'ana<b>']) {
     assert.ok(social.checkNickname(bad).problem, bad);
   }

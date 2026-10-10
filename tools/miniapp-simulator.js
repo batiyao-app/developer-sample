@@ -655,7 +655,7 @@ function mpOp(sim, conn, q) {
       if (!Number.isInteger(max) || max < MP.minPlayers || max > MP.maxPlayers) return fail('INVALID', 'max_players is a whole number from 2 to 8.');
       let meta = q.meta == null ? {} : q.meta;
       if (typeof meta !== 'object' || Array.isArray(meta) || jsonBytes(meta) > MP.metaBytes) return fail('INVALID', 'meta is an object of at most 256 bytes as JSON.');
-      if (sim.matches.size >= MP.matchesPerApp) return fail('BUSY', 'This app has too many live matches. Try again soon.');
+      if (sim.matches.size >= MP.matchesPerApp) return fail('RATE_LIMITED', 'This app has too many live matches. Try again soon.');
       let code;
       do code = social.matchCode(); while ([...sim.matches.values()].some((m) => m.code === code && m.space === conn.space));
       const m = { id: 'm_' + require('node:crypto').randomBytes(6).toString('hex'), code, max, public: !!q.public, meta, space: conn.space,
