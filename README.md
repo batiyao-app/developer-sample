@@ -164,9 +164,9 @@ from the internet. You host nothing. The full guide is at
 
 | | |
 |---|---|
-| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK (1.2.0): one file, copy it into your app. `ready`, `getContext`, `storage`, `pay`, `share`, `pickImage`, `pickVideo`, `supports`, `getPurchases`, `consume`, `close`. |
+| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK (1.3.0): one file, copy it into your app. `ready`, `getContext`, `storage`, `pay`, `share`, `pickImage`, `pickVideo`, `getNickname`, `db`, `multiplayer`, `supports`, `getPurchases`, `consume`, `close`. |
 | [`miniapp/wingbeat/`](miniapp/wingbeat) | The sample game: saved best score, a consumable (golden feathers), a permanent purchase (night sky), and "Share my score" (a score card drawn on a canvas, offered with `share()`). Live on Batiyao — open Mini apps and play it. |
-| [`tools/miniapp-simulator.js`](tools/miniapp-simulator.js) | A stand-in for Batiyao on your machine: same sandbox, a payment sheet from your manifest, share and photo/video sheets, a log of every SDK call. |
+| [`tools/miniapp-simulator.js`](tools/miniapp-simulator.js) | A stand-in for Batiyao on your machine: same sandbox, a payment sheet from your manifest, share and photo/video sheets, nicknames, a shared store and multiplayer across tabs, a log of every SDK call. |
 | [`tools/pack-miniapp.js`](tools/pack-miniapp.js) | Checks the folder against Batiyao's upload rules and zips it. |
 
 ```bash
@@ -210,6 +210,53 @@ The rules that shape the code:
     img.src = URL.createObjectURL(r.image);           // or createImageBitmap(r.image)
   };
   ```
+- **Nicknames are Batiyao's too.** Your app never asks for a name.
+  `await Batiyao.getNickname()` gives `{ nickname }` (or `null` if the
+  person has none yet); `getNickname({ ask: true })`, from a tap, shows
+  Batiyao's own sheet first. Children choose from Batiyao's suggestions
+  ("Calm Koala 47"). People can change it from Batiyao's menu: listen with
+  `Batiyao.on('nickname', fn)`.
+- **One store shared by everyone in your app: `Batiyao.db`.** 1 MB in all
+  (test runs get their own). Each person writes only their own records, one
+  per key, and everyone reads them — a champions list is one key everyone
+  writes their best to. Values are text of at most 1,024 bytes. Mark a write
+  `replaceable` (with a `rank`, such as the score) and Batiyao may replace it
+  when the store is full: no rank before ranked, lower rank first, older
+  first. If your write would be the first to go, it isn't saved
+  (`{ saved: false }`: it didn't make the board); with nothing replaceable,
+  a full store refuses with `STORE_FULL`. Scores come from people's own
+  devices, so treat the board as for fun.
+
+  ```js
+  if (await Batiyao.supports('db')) {
+    await Batiyao.db.set('best', JSON.stringify({ score }), { replaceable: true, rank: score });
+    const { records } = await Batiyao.db.list('best', { order: 'rank_desc', limit: 10 });
+    records.forEach((r) => addRow(r.player.nickname || 'Player', JSON.parse(r.value).score));
+  }
+  ```
+- **Multiplayer is real-time matches of 2-8, relayed by Batiyao.** Only for
+  apps a Batiyao admin has allowed (ask on your app's page), and adults
+  only unless the admin allows children too; then children play only with
+  children of their age, and only if a guardian has allowed it. Check
+  `supports('multiplayer')`. `host({ max_players, public, meta })` and
+  `join({ code })` (from a tap) resolve `{ status: 'joined', match }`,
+  `'cancelled'` or `'unavailable'`; Batiyao asks for a nickname first.
+  `send(data, { to })` takes any JSON up to 1,024 bytes and resolves at once
+  (no receipt; past 20 a second the extra are dropped). Events:
+  `multiplayer.on('joined' | 'left' | 'message' | 'host' | 'closed', fn)`.
+  Nothing players send is kept. **Never use it to let people chat**: a
+  developer whose game does is banned and all their apps are blocked.
+
+  ```js
+  const r = await Batiyao.multiplayer.host({ max_players: 2 });
+  if (r.status === 'joined') showCode(r.match.code);    // the friend types it into join()
+  Batiyao.multiplayer.on('message', ({ from, data }) => applyMove(from.id, data));
+  Batiyao.multiplayer.send({ move: 'e4' });
+  ```
+
+  In the simulator every tab is its own player: open two to play against
+  yourself. `/?age=minor` makes a tab a child; `/?mp=off` and
+  `/?mp=ask_guardian` (or the switch on the page) try the other answers.
 - **Credit, save, then consume.** Check `getPurchases()` at start-up and
   credit anything new before `consume()`, so nothing is lost if the app
   closes mid-way (see `syncPurchases` in [game.js](miniapp/wingbeat/game.js)).
@@ -226,8 +273,10 @@ confirm-before-spending rule, a 402, token refresh, media and story upload,
 and Disconnect. No network access or Batiyao account is needed. The mini app
 tests check Wingbeat against the upload rules, that remote and root-relative
 references are refused, the packer's zip, that the simulator serves the game
-sealed off and offers the picker, and the SDK's option checks and
-`supports()` (including what an older Batiyao without `features` has).
+sealed off and offers the picker, the SDK's option checks and
+`supports()` (including what an older Batiyao without `features` has), the
+nickname rules, the order a full shared store replaces records in, match
+codes, and the simulator's leaderboard and matches.
 
 ## Links
 
