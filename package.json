@@ -1,11 +1,13 @@
 {
   "name": "batiyao-developer-sample",
   "version": "1.0.0",
-  "description": "A sample app that connects to Batiyao with OAuth (PKCE) and uses every capability of the public API.",
+  "description": "A sample app that connects to Batiyao with OAuth (PKCE) and uses every capability of the public API, and a sample mini app (Wingbeat) with the mini app SDK and tools.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/"
+    "test": "node --test test/",
+    "miniapp": "node tools/miniapp-simulator.js",
+    "pack:miniapp": "node tools/pack-miniapp.js"
   },
   "engines": {
     "node": ">=18"

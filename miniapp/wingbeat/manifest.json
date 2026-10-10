@@ -1,0 +1,30 @@
+{
+  "batiyao_miniapp": 1,
+  "app_id": "ma_replaceme2",
+  "version": "1.0.0",
+  "name": "Wingbeat",
+  "summary": "Tap to flap through the gaps. How far can you fly?",
+  "description": "A small one-tap flying game, and the reference mini app for Batiyao developers.\n\nIt saves your best score with Batiyao's storage, sells golden feathers that let you keep going after a crash, and a night sky you keep forever. Everything is drawn in the browser: it runs with no network at all.",
+  "category": "games",
+  "age_rating": "4+",
+  "entry": "index.html",
+  "icon": "icon.png",
+  "orientation": "portrait",
+  "access": { "type": "free" },
+  "products": [
+    {
+      "id": "golden_feathers",
+      "title": "3 golden feathers",
+      "statement": "3 golden feathers for Wingbeat. Each one lets you keep flying after a crash.",
+      "price": "0.5",
+      "kind": "consumable"
+    },
+    {
+      "id": "night_sky",
+      "title": "Night sky",
+      "statement": "The night sky theme for Wingbeat, yours to keep.",
+      "price": "1",
+      "kind": "permanent"
+    }
+  ]
+}

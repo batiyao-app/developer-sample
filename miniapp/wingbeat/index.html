@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Wingbeat</title>
+  <!-- Everything is in the bundle: a mini app has no network. Paths are
+       relative ("style.css", not "/style.css"). -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="stage">
+    <canvas id="game" width="360" height="640" aria-label="Wingbeat game"></canvas>
+
+    <div id="hud" aria-live="polite">
+      <span id="score">0</span>
+      <span id="feathers" title="Golden feathers">🪶 0</span>
+    </div>
+
+    <section id="start" class="panel">
+      <h1>Wingbeat</h1>
+      <p>Tap, click or press space to flap.</p>
+      <p class="best">Best: <span id="best-start">0</span></p>
+      <button id="play" class="primary">Play</button>
+      <div class="shop">
+        <button id="buy-night" data-product="night_sky">Night sky · 1 BuckBuck</button>
+      </div>
+    </section>
+
+    <section id="over" class="panel" hidden>
+      <h2>Crashed!</h2>
+      <p>Score <strong id="final">0</strong> · Best <strong id="best">0</strong></p>
+      <button id="continue" class="primary" hidden>Keep flying (use a feather)</button>
+      <button id="again">Play again</button>
+      <div class="shop">
+        <button id="buy-feathers" data-product="golden_feathers">3 golden feathers · 0.5 BuckBuck</button>
+      </div>
+      <p id="message" class="message" role="status"></p>
+    </section>
+  </main>
+
+  <script src="batiyao-miniapp.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>

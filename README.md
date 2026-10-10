@@ -8,6 +8,10 @@ uploading media and posting a story — and disconnecting again.
 It is plain Node.js with **no dependencies**: clone it, add your app's client
 ID, and run it on `localhost`.
 
+It also has a **mini app**: [Wingbeat](miniapp/wingbeat), a small flying game
+that runs *inside* Batiyao, with the SDK and tools to build your own — see
+[Mini apps](#mini-apps).
+
 ## What you need
 
 - **Node.js 18 or newer** (it uses the built-in `fetch`).
@@ -151,6 +155,43 @@ The sample keeps things short on purpose. For production:
   `Secure` (here they live in memory; a restart signs everyone out).
 - Keep the `state` and CSRF checks.
 
+## Mini apps
+
+A mini app is a different kind of thing from the web app above: a folder of
+HTML, CSS and JavaScript that Batiyao hosts and runs for people, sealed off
+from the internet. You host nothing. The full guide is at
+<https://developer.batiyao.com/miniapps>.
+
+| | |
+|---|---|
+| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK: one file, copy it into your app. `ready`, `getContext`, `storage`, `pay`, `getPurchases`, `consume`, `close`. |
+| [`miniapp/wingbeat/`](miniapp/wingbeat) | The sample game: saved best score, a consumable (golden feathers) and a permanent purchase (night sky). Live on Batiyao — open Mini apps and play it. |
+| [`tools/miniapp-simulator.js`](tools/miniapp-simulator.js) | A stand-in for Batiyao on your machine: same sandbox, a payment sheet from your manifest, a log of every SDK call. |
+| [`tools/pack-miniapp.js`](tools/pack-miniapp.js) | Checks the folder against Batiyao's upload rules and zips it. |
+
+```bash
+npm run miniapp                         # simulate Wingbeat at http://localhost:3100
+npm run miniapp -- path/to/your-app     # or your own folder
+
+# Register your app on batiyao.com → Mini apps → Built by me → New app,
+# then pack it with the App ID you were given:
+npm run pack:miniapp -- miniapp/wingbeat --app-id ma_abcdefgh23
+```
+
+Upload the zip on your app's page and press **Test**: that runs your version
+exactly as people will see it, with payments that move nothing. An admin
+reviews each version; if nobody acts within an hour it goes live by itself.
+
+Three rules that shape the code:
+
+- **Bundle everything, with relative paths.** Nothing outside the folder
+  loads: no CDN, no remote font, no `fetch` to another host.
+- **Batiyao draws the payment sheet, not you.** Call `Batiyao.pay({ product })`
+  from a tap; the price and wording come from your reviewed manifest.
+- **Credit, save, then consume.** Check `getPurchases()` at start-up and
+  credit anything new before `consume()`, so nothing is lost if the app
+  closes mid-way (see `syncPurchases` in [game.js](miniapp/wingbeat/game.js)).
+
 ## Tests
 
 ```bash
@@ -160,12 +201,17 @@ npm test
 The end-to-end test runs the real server against a stand-in for Batiyao:
 the sign-in with PKCE verified, every page, escaping of user content, the
 confirm-before-spending rule, a 402, token refresh, media and story upload,
-and Disconnect. No network access or Batiyao account is needed.
+and Disconnect. No network access or Batiyao account is needed. The mini app
+tests check Wingbeat against the upload rules, that remote and root-relative
+references are refused, the packer's zip, and that the simulator serves the
+game sealed off.
 
 ## Links
 
 - Documentation: <https://developer.batiyao.com>
 - Register an app: <https://batiyao.com/settings/developer>
 - People manage connected apps at: <https://batiyao.com/settings/connections>
+- Mini apps guide: <https://developer.batiyao.com/miniapps>
+- Build a mini app: <https://batiyao.com/apps?tab=built>
 
 MIT licensed. See [LICENSE](LICENSE).
