@@ -111,7 +111,7 @@ const code = (p) => p.then(() => 'resolved', (e) => e.code);
 
 test('pickImage and pickVideo check their options before asking Batiyao', async () => {
   const { Batiyao, sent } = sdkWith(() => ({ result: { status: 'cancelled' } }));
-  assert.strictEqual(Batiyao.version, '1.3.0');
+  assert.strictEqual(Batiyao.version, '1.4.0');
   for (const bad of [10, 5000, 1.5, '512']) assert.strictEqual(await code(Batiyao.pickImage({ max_size: bad })), 'INVALID');
   for (const bad of [0, 601, 'x', Infinity]) assert.strictEqual(await code(Batiyao.pickVideo({ max_seconds: bad })), 'INVALID');
   assert.strictEqual(sent.length, 0);
@@ -339,4 +339,75 @@ test('the simulator keeps nicknames, a shared leaderboard and matches like Batiy
   simulator.sweepMatches(sim, Date.now() + 11 * 60 * 1000);
   assert.deepStrictEqual(out.b.at(-1), { type: 'closed', data: { reason: 'idle' } });
   assert.strictEqual(sim.matches.size, 0);
+});
+
+test('ai checks its options before asking Batiyao', async () => {
+  const { Batiyao, sent } = sdkWith(() => ({ result: { status: 'unavailable' } }));
+  for (const bad of [{}, { prompt: '' }, { prompt: 'x'.repeat(401) }, { prompt: 'cat', quality: 'ultra' }, { prompt: 'cat', seed: -1 }, { prompt: 'cat', avoid: 'x'.repeat(201) }]) {
+    assert.strictEqual(await code(Batiyao.ai.image.generate(bad)), 'INVALID', JSON.stringify(bad));
+  }
+  for (const bad of [{ prompt: 'rain', kind: 'speech' }, { prompt: 'rain', kind: 'sound', seconds: 15 }, { prompt: 'rain', seconds: 7 }]) {
+    assert.strictEqual(await code(Batiyao.ai.audio.generate(bad)), 'INVALID', JSON.stringify(bad));
+  }
+  for (const bad of [{ prompt: '' }, { prompt: 'q', format: 'xml' }, { prompt: 'q', max_chars: 10 }, { prompt: 'q', context: 'x'.repeat(8001) }]) {
+    assert.strictEqual(await code(Batiyao.ai.ask(bad)), 'INVALID', JSON.stringify(bad));
+  }
+  assert.strictEqual(sent.length, 0);
+  assert.strictEqual((await Batiyao.ai.image.generate({ prompt: 'a red kite', quality: 'best', seed: 7 })).status, 'unavailable');
+  await Batiyao.ai.audio.generate({ prompt: 'rain on a roof', kind: 'sound', seconds: 6 });
+  await Batiyao.ai.ask({ prompt: 'Three facts about kites', web_search: true, format: 'json' });
+  assert.strictEqual(JSON.stringify(sent.map((m) => [m.method, m.params])), JSON.stringify([
+    ['ai.image.generate', { prompt: 'a red kite', quality: 'best', seed: 7 }],
+    ['ai.audio.generate', { prompt: 'rain on a roof', kind: 'sound', seconds: 6 }],
+    ['ai.ask', { prompt: 'Three facts about kites', web_search: true, format: 'json' }],
+  ]));
+});
+
+test('ai progress reaches only its own request', async () => {
+  let ping = null;
+  const seen = [];
+  const s = sdkWith((m) => {
+    if (m === 'ai.image.generate') return { result: { status: 'made' } };
+    return { result: {} };
+  });
+  // Send progress for the request before it is answered.
+  const p = s.Batiyao.ai.image.generate({ prompt: 'kite', onProgress: (x) => seen.push(x.done) });
+  ping = s.sent[0].id;
+  s.emit('ai.progress', { request: ping, stage: 'making', done: 2, total: 5 });
+  s.emit('ai.progress', { request: 'someone-else', stage: 'making', done: 9, total: 9 });
+  await p;
+  assert.deepStrictEqual(seen, [2]);
+});
+
+test('capability() says ready, needs_download or unavailable, never why', async () => {
+  const ctx = { features: ['pay', 'ai.image', 'ai.assistant'], capabilities: {
+    'ai.image': { version: 1, state: 'needs_download', tools: [] },
+    'ai.assistant': { version: 1, state: 'ready', tools: ['web_search'] },
+    'ai.audio': { version: 1, state: 'unavailable', tools: [] },
+  } };
+  const { Batiyao } = sdkWith(() => ({ result: ctx }));
+  assert.strictEqual(JSON.stringify(await Batiyao.capability('ai.image')), '{"supported":true,"version":1,"state":"needs_download","tools":[]}');
+  assert.strictEqual((await Batiyao.capability('ai.assistant')).tools[0], 'web_search');
+  assert.strictEqual((await Batiyao.capability('ai.audio')).state, 'unavailable');
+  assert.strictEqual((await Batiyao.capability('teleport')).supported, false);
+  assert.strictEqual(await Batiyao.supports('ai.ask'), true);
+  assert.strictEqual(await Batiyao.supports('ai.audio.generate'), false);
+  const older = sdkWith(() => ({ result: { platform: 'android', features: ['pay'] } })).Batiyao;
+  assert.strictEqual((await older.capability('ai.image')).state, 'unavailable');
+});
+
+test('requires and capabilities follow the server rules', () => {
+  const files = readFolder(WINGBEAT);
+  const base = JSON.parse(files.find((f) => f.path === 'manifest.json').data);
+  const check = (extra) => checkBundle(withFile(files, 'manifest.json', JSON.stringify({ ...base, ...extra }))).problems;
+  assert.deepStrictEqual(check({ requires: ['ai.image'], capabilities: { 'ai.image': { version: 1, purpose: 'Draws a card for each level.' } } }), []);
+  const one = (extra, want) => assert.ok(check(extra).some((p) => p.includes(want)), `${JSON.stringify(extra)}: ${check(extra).join('; ')}`);
+  one({ capabilities: { 'ai.video': { version: 1, purpose: 'Something long enough.' } } }, "isn't a capability");
+  one({ capabilities: { 'ai.image': { version: 2, purpose: 'Something long enough.' } } }, '"version"');
+  one({ capabilities: { 'ai.image': { version: 1, purpose: 'short' } } }, 'purpose');
+  one({ capabilities: { 'ai.image': { version: 1, purpose: 'Something long enough.', tools: ['web_search'] } } }, 'takes no');
+  one({ capabilities: { 'ai.assistant': { version: 1, purpose: 'Something long enough.', tools: ['read_page'] } } }, 'may only list');
+  one({ capabilities: { 'ai.image': { version: 1, purpose: 'Something long enough.', price: 1 } } }, 'unknown field');
+  one({ requires: ['ai.audio'] }, 'must declare it too');
+  one({ requires: ['teleport'] }, "isn't a Batiyao feature");
 });

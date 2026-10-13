@@ -27,6 +27,11 @@
 // the app, or a child whose guardian hasn't allowed playing online. Nothing
 // is kept when the simulator stops.
 //
+// Batiyao's AI (SDK 1.4.0): ai.image, ai.audio and ai.ask answer with
+// stand-ins — a picture with your words on it, a tone, a canned answer — so
+// you can build the flow. The real ones run on a phone. Try the other
+// answers with the page's AI switch, or /?ai=needs_download, /?ai=unavailable.
+//
 // It is a convenience, not the judge: before you upload, test on Batiyao
 // itself (Built by me → your app → Test), which runs the real host.
 'use strict';
@@ -135,6 +140,7 @@ const HOST_PAGE = (manifest) => `<!doctype html>
 </div>
 <div><div id="tools"><button id="clear-storage">Clear saved data</button><button id="clear-purchases">Clear purchases</button><button id="visibility">Send visibility: hidden, then visible</button><label><input type="checkbox" id="pick-unavailable"> Photos and videos: unavailable (a child without the guardian's switch)</label><br>
 <button id="nickname">Nickname in this app</button><button id="clear-shared">Clear the shared store</button>
+<label>Batiyao's AI: <select id="ai-mode"><option value="ready">ready</option><option value="needs_download">needs a download</option><option value="unavailable">unavailable</option></select></label>
 <label>Multiplayer: <select id="mp-mode"><option value="on">on</option><option value="off">off for this app</option><option value="ask_guardian">a child without the guardian's switch</option></select></label>
 <span id="who"></span></div><div id="log"></div></div>
 <script>
@@ -157,9 +163,42 @@ const MINOR = QS.get('age') === 'minor';
 const PLAYER = sessionStorage.getItem('sim:player') || (() => { const id = 'sim-' + Math.random().toString(36).slice(2, 8); sessionStorage.setItem('sim:player', id); return id; })();
 document.getElementById('who').textContent = 'You are ' + PLAYER + (MINOR ? ' (a child, 13-15)' : ' (an adult)');
 const mpMode = () => document.getElementById('mp-mode').value;
-const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname'].concat(mpMode() === 'off' ? [] : ['multiplayer']);
+if (['needs_download', 'unavailable'].includes(QS.get('ai'))) document.getElementById('ai-mode').value = QS.get('ai');
+const aiMode = () => document.getElementById('ai-mode').value;
+const DECLARED = MANIFEST.capabilities || {};
+const aiCaps = () => Object.fromEntries(Object.entries(DECLARED).map(([n, c]) => [n, { version: c.version, state: aiMode(), tools: c.tools || [] }]));
+const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname'].concat(mpMode() === 'off' ? [] : ['multiplayer'])
+  .concat(aiMode() === 'unavailable' ? [] : Object.keys(DECLARED));
+let aiRunning = null;
 let nicking = null;
 const KEYRE = /^[A-Za-z0-9_.:-]{1,128}$/;
+// Stand-ins for Batiyao's AI: the shape of the real answers, not their content.
+async function finishAI(m, p) {
+  if (m.method === 'ai.image.generate') {
+    const c = document.createElement('canvas'); c.width = 384; c.height = 384;
+    const g = c.getContext('2d');
+    const grad = g.createLinearGradient(0, 0, 384, 384); grad.addColorStop(0, '#7c3aed'); grad.addColorStop(1, '#f59e0b');
+    g.fillStyle = grad; g.fillRect(0, 0, 384, 384);
+    g.fillStyle = '#fff'; g.font = '20px sans-serif'; g.textAlign = 'center';
+    (String(p.prompt).slice(0, 60).match(/.{1,22}/g) || []).forEach((line, i) => g.fillText(line, 192, 150 + i * 26));
+    g.font = '14px sans-serif'; g.fillText('simulated BGen picture', 192, 360);
+    const image = await new Promise((res) => c.toBlob(res, 'image/png'));
+    return reply(m.id, { status: 'made', image, type: 'image/png', width: 384, height: 384, seed: p.seed ?? Math.floor(Math.random() * 2147483647) });
+  }
+  if (m.method === 'ai.audio.generate') {
+    const seconds = p.seconds || (p.kind === 'sound' ? 6 : 15);
+    const rate = 22050, n = rate * seconds, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+    v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    w(36, 'data'); v.setUint32(40, n * 2, true);
+    for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.sin(i * 2 * Math.PI * (p.kind === 'sound' ? 880 : 440) / rate) * 6000, true);
+    return reply(m.id, { status: 'made', audio: new Blob([buf], { type: 'audio/wav' }), type: 'audio/wav', seconds, seed: p.seed ?? 1 });
+  }
+  const text = p.format === 'json' ? '{"simulated": true}' : 'Simulated Batiyao AI answer to: ' + String(p.prompt).slice(0, 200);
+  return reply(m.id, { status: 'answered', text, json: p.format === 'json' ? { simulated: true } : null, searched: !!p.web_search });
+}
+
 function handle(m) {
   log('→ ' + m.method + ' ' + JSON.stringify(m.params || {}));
   const p = m.params || {};
@@ -168,7 +207,7 @@ function handle(m) {
   const bad = (code, message) => reply(m.id, null, { code, message });
   switch (m.method) {
     case 'ready': return reply(m.id, {});
-    case 'getContext': return reply(m.id, { app_user_id: PLAYER, platform: 'web', locale: navigator.language, theme: 'light', version: MANIFEST.version, test_mode: true, access: { type: MANIFEST.access.type, active: true }, features: features() });
+    case 'getContext': return reply(m.id, { app_user_id: PLAYER, platform: 'web', locale: navigator.language, theme: 'light', version: MANIFEST.version, test_mode: true, access: { type: MANIFEST.access.type, active: true }, features: features(), capabilities: aiCaps() });
     case 'storage.get': if (!KEYRE.test(p.key)) return bad('INVALID_KEY', 'bad key'); return reply(m.id, { value: storage[p.key] ?? null });
     case 'storage.set':
       if (!KEYRE.test(p.key)) return bad('INVALID_KEY', 'bad key');
@@ -232,6 +271,27 @@ function handle(m) {
       openPick();
       return;
     }
+    case 'ai.image.generate':
+    case 'ai.audio.generate':
+    case 'ai.ask': {
+      const cap = m.method === 'ai.ask' ? 'ai.assistant' : m.method.replace('.generate', '');
+      if (!DECLARED[cap]) return bad('NOT_DECLARED', 'Add "' + cap + '" to "capabilities" in manifest.json to use it.');
+      if (m.method !== 'ai.ask' && navigator.userActivation && !navigator.userActivation.isActive) return bad('NEEDS_TAP', 'Call it from a tap or click.');
+      if (aiRunning || busy()) return bad('BUSY', 'One AI request at a time.');
+      if (aiMode() === 'unavailable') return reply(m.id, { status: 'unavailable' });
+      if (p.web_search && !(DECLARED[cap].tools || []).includes('web_search')) return bad('NOT_DECLARED', 'Add "tools": ["web_search"] to ai.assistant in manifest.json.');
+      if (aiMode() === 'needs_download') log('(Batiyao would ask the person to download the model first)', 'ev');
+      aiRunning = { id: m.id, timers: [] };
+      const steps = m.method === 'ai.image.generate' ? 5 : 3;
+      for (let i = 1; i <= steps; i++) {
+        aiRunning.timers.push(setTimeout(() => frame.contentWindow.postMessage({ batiyao: 1, event: 'ai.progress', data: { request: m.id, stage: m.method === 'ai.ask' && p.web_search && i === 1 ? 'searching' : 'making', done: i, total: steps } }, '*'), i * 300));
+      }
+      aiRunning.timers.push(setTimeout(() => { aiRunning = null; finishAI(m, p).catch((e) => bad('FAILED', String(e))); }, steps * 300 + 200));
+      return;
+    }
+    case 'ai.cancel':
+      if (aiRunning) { aiRunning.timers.forEach(clearTimeout); reply(aiRunning.id, { status: 'cancelled' }); aiRunning = null; }
+      return reply(m.id, {});
     case 'close': reply(m.id, {}); log('the app asked to close', 'ev'); return;
     default:
       if (SOCIAL[m.method]) return SOCIAL[m.method](m, p).catch((e) => bad('FAILED', String(e && e.message || e)));

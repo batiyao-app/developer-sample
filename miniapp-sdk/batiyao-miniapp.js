@@ -19,12 +19,17 @@
  * 1.2.0 (2026-10-10): pickImage(), pickVideo() and supports().
  * 1.3.0 (2026-10-10): getNickname(), db (a store shared by everyone in your
  *   app) and multiplayer (real-time matches).
+ * 1.4.0 (2026-10-13): ai — Batiyao's AI on the person's phone: pictures
+ *   (BGen), sounds (BAudio) and answers (Batiyao AI, with web search if you
+ *   ask). Declare each in manifest.json "capabilities"; Batiyao decides.
+ *   capability() says whether it works here. On the website and on phones
+ *   that can't run it, it resolves { status: 'unavailable' }.
  */
 (function (global) {
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.3.0';
+  var VERSION = '1.4.0';
   var pending = Object.create(null);
   var listeners = Object.create(null);
   var counter = 0;
@@ -36,7 +41,10 @@
     return err;
   }
 
-  function send(method, params, timeoutMs) {
+  // Progress callbacks of running ai requests, by request id.
+  var progress = Object.create(null);
+
+  function send(method, params, timeoutMs, onProgress) {
     return new Promise(function (resolve, reject) {
       if (!isFramed) {
         reject(makeError('NO_HOST', 'This page is not running inside Batiyao (or the simulator).'));
@@ -52,6 +60,7 @@
         }, timeoutMs);
       }
       pending[id] = { resolve: resolve, reject: reject, timer: timer };
+      if (onProgress) progress[id] = onProgress;
       global.parent.postMessage({ batiyao: PROTOCOL, id: id, method: method, params: params || {} }, '*');
     });
   }
@@ -61,9 +70,17 @@
     if (typeof data.id === 'string' && pending[data.id]) {
       var p = pending[data.id];
       delete pending[data.id];
+      delete progress[data.id];
       if (p.timer) clearTimeout(p.timer);
       if (data.error) p.reject(makeError(data.error.code, data.error.message));
       else p.resolve(data.result);
+      return;
+    }
+    if (data.event === 'ai.progress' && data.data && typeof data.data.request === 'string') {
+      var fn = progress[data.data.request];
+      if (fn) {
+        try { fn({ stage: data.data.stage, done: data.data.done, total: data.data.total }); } catch (e) { /* the app's own error */ }
+      }
       return;
     }
     if (typeof data.event === 'string') {
@@ -87,7 +104,34 @@
     'getPurchases', 'consume', 'close', 'on', 'off', 'supports'];
   var LEGACY_FEATURES = ['pay', 'share'];
   // Method names that belong to one listed feature.
-  var FEATURE_OF = { getNickname: 'nickname' };
+  var FEATURE_OF = { getNickname: 'nickname', 'ai.image.generate': 'ai.image', 'ai.audio.generate': 'ai.audio', 'ai.ask': 'ai.assistant' };
+  var AI_CAPABILITIES = ['ai.image', 'ai.audio', 'ai.assistant'];
+  var IMAGE_QUALITY = ['fast', 'balanced', 'best'];
+  var AUDIO_SECONDS = { music: [8, 15, 30], sound: [3, 6, 12] };
+
+  function checkText(name, v, min, max, optional) {
+    if (v == null && optional) return null;
+    if (typeof v !== 'string' || v.trim().length < min || v.length > max) {
+      return makeError('INVALID', name + ' is text of ' + min + ' to ' + max + ' characters.');
+    }
+    return null;
+  }
+
+  function checkSeed(seed) {
+    if (seed == null) return null;
+    if (!isWhole(seed) || seed < 0 || seed > 2147483647) return makeError('INVALID', 'seed is a whole number from 0 to 2147483647.');
+    return null;
+  }
+
+  function context() {
+    if (!contextPromise) {
+      contextPromise = send('getContext', {}, 10000).catch(function (e) {
+        contextPromise = null;
+        throw e;
+      });
+    }
+    return contextPromise;
+  }
   var contextPromise = null;
 
   function isWhole(n) {
@@ -251,19 +295,132 @@
         if (FEATURE_OF[name]) name = FEATURE_OF[name];
         else if (/^(db|multiplayer)\./.test(name)) name = name.split('.')[0];
       }
-      if (!contextPromise) {
-        contextPromise = send('getContext', {}, 10000).catch(function (e) {
-          contextPromise = null;
-          throw e;
-        });
-      }
-      return contextPromise.then(function (ctx) {
+      return context().then(function (ctx) {
         var f = ctx && ctx.features;
         if (Array.isArray(f)) return f.indexOf(name) >= 0;
         return LEGACY_FEATURES.indexOf(name) >= 0;
       }, function () {
         return false;
       });
+    },
+
+    /**
+     * Can your app use this capability here? Resolves (never rejects)
+     * { supported, version, state, tools }:
+     *   supported: this Batiyao has it, at the version your manifest asks for;
+     *   state: 'ready' | 'needs_download' (Batiyao asks the person to download
+     *     the model the first time) | 'unavailable' (not here, or not for this
+     *     person — Batiyao never says why);
+     *   tools: what you may use with it (e.g. ['web_search']).
+     * Use it to show a button only where it works.
+     */
+    capability: function (name) {
+      var none = { supported: false, version: 0, state: 'unavailable', tools: [] };
+      if (AI_CAPABILITIES.indexOf(name) < 0) return Promise.resolve(none);
+      return context().then(function (ctx) {
+        var c = ctx && ctx.capabilities && ctx.capabilities[name];
+        var listed = ctx && Array.isArray(ctx.features) && ctx.features.indexOf(name) >= 0;
+        if (!c) return none;
+        var state = ['ready', 'needs_download'].indexOf(c.state) >= 0 && listed ? c.state : 'unavailable';
+        return { supported: listed, version: c.version || 0, state: state, tools: Array.isArray(c.tools) ? c.tools : [] };
+      }, function () {
+        return none;
+      });
+    },
+
+    /**
+     * Batiyao's AI, on the person's phone. Declare what you use in
+     * manifest.json "capabilities" (with your reason, shown to people before
+     * they open your app); a Batiyao admin decides. Nothing you ask leaves
+     * the phone, except Batiyao AI's web searches, which go through
+     * Batiyao. Every answer is { status: ... }:
+     *   'made' / 'answered' — here it is;
+     *   'cancelled' — the person stopped it (or the app went to the background);
+     *   'unavailable' — not here or not for this person: carry on without it;
+     *   'blocked' — Batiyao wouldn't make that: ask for something else.
+     * Rejections are your app's mistakes: INVALID, NOT_DECLARED (not in your
+     * manifest), NEEDS_TAP (call it from a tap), BUSY (one AI request at a
+     * time, or a Batiyao sheet is open), UNKNOWN_METHOD (an older Batiyao).
+     * onProgress, if given, is called with { stage, done, total }.
+     */
+    ai: {
+      image: {
+        /**
+         * A picture from words, by BGen: { prompt (1-400 characters), avoid
+         * (what to leave out, up to 200), quality: 'fast' | 'balanced' |
+         * 'best' (fast is about 40 s on a phone), seed (the same seed and
+         * words make the same picture), onProgress }. Call it from a tap.
+         * Resolves { status: 'made', image: Blob, type: 'image/png', width,
+         * height, seed } or another status. Pictures are 384 x 384 in
+         * version 1.
+         */
+        generate: function (options) {
+          options = options || {};
+          var err = checkText('prompt', options.prompt, 1, 400) || checkText('avoid', options.avoid, 0, 200, true) || checkSeed(options.seed);
+          if (!err && options.quality != null && IMAGE_QUALITY.indexOf(options.quality) < 0) {
+            err = makeError('INVALID', 'quality is fast, balanced or best.');
+          }
+          if (err) return Promise.reject(err);
+          var params = { prompt: options.prompt };
+          if (options.avoid != null) params.avoid = options.avoid;
+          if (options.quality != null) params.quality = options.quality;
+          if (options.seed != null) params.seed = options.seed;
+          return send('ai.image.generate', params, 0, options.onProgress);
+        }
+      },
+      audio: {
+        /**
+         * Music or a sound from words, by BAudio: { prompt (1-400
+         * characters), kind: 'music' (8, 15 or 30 seconds; default 15) or
+         * 'sound' (3, 6 or 12; default 6), seconds, seed, onProgress }. No
+         * singing. Call it from a tap. Resolves { status: 'made', audio:
+         * Blob, type: 'audio/wav', seconds, seed } or another status.
+         */
+        generate: function (options) {
+          options = options || {};
+          var kind = options.kind == null ? 'music' : options.kind;
+          var err = checkText('prompt', options.prompt, 1, 400) || checkSeed(options.seed);
+          if (!err && !AUDIO_SECONDS[kind]) err = makeError('INVALID', 'kind is music or sound.');
+          if (!err && options.seconds != null && AUDIO_SECONDS[kind].indexOf(options.seconds) < 0) {
+            err = makeError('INVALID', kind + ' is ' + AUDIO_SECONDS[kind].join(', ') + ' seconds long.');
+          }
+          if (err) return Promise.reject(err);
+          var params = { prompt: options.prompt, kind: kind };
+          if (options.seconds != null) params.seconds = options.seconds;
+          if (options.seed != null) params.seed = options.seed;
+          return send('ai.audio.generate', params, 0, options.onProgress);
+        }
+      },
+      /**
+       * An answer from Batiyao AI: { prompt (1-2000 characters), context
+       * (text it should use, up to 8000), web_search (true to let it look
+       * things up; needs "tools": ["web_search"] in your manifest), format:
+       * 'text' | 'json' (then answer with JSON only; it is parsed for you),
+       * max_chars (50-1500, default 800), onProgress }. It can't act on the
+       * person's account, and it never gives links: only the answer.
+       * Resolves { status: 'answered', text, json, searched } or another
+       * status; json is the parsed value when format is 'json', else null.
+       */
+      ask: function (options) {
+        options = options || {};
+        var err = checkText('prompt', options.prompt, 1, 2000) || checkText('context', options.context, 0, 8000, true);
+        if (!err && options.format != null && options.format !== 'text' && options.format !== 'json') {
+          err = makeError('INVALID', 'format is text or json.');
+        }
+        if (!err && options.max_chars != null && (!isWhole(options.max_chars) || options.max_chars < 50 || options.max_chars > 1500)) {
+          err = makeError('INVALID', 'max_chars is a whole number from 50 to 1500.');
+        }
+        if (err) return Promise.reject(err);
+        var params = { prompt: options.prompt, web_search: !!options.web_search };
+        if (options.context != null) params.context = options.context;
+        if (options.format != null) params.format = options.format;
+        if (options.max_chars != null) params.max_chars = options.max_chars;
+        return send('ai.ask', params, 0, options.onProgress);
+      },
+      /** Stop your app's AI request, if one is running. Resolves {}. */
+      cancel: function () {
+        return send('ai.cancel', {}, 10000).then(function () { return {}; });
+      }
     },
 
     /**
