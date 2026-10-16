@@ -164,7 +164,7 @@ from the internet. You host nothing. The full guide is at
 
 | | |
 |---|---|
-| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK (1.4.0): one file, copy it into your app. `ready`, `getContext`, `storage`, `pay`, `share`, `pickImage`, `pickVideo`, `getNickname`, `db`, `multiplayer`, `ai` (BGen pictures, BAudio sounds, Batiyao AI answers), `capability`, `supports`, `getPurchases`, `consume`, `close`. |
+| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK (1.5.0): one file, copy it into your app. `ready`, `getContext` (with `link` when opened from an invite link), `storage`, `pay`, `share`, `pickImage`, `pickVideo`, `getNickname`, `db`, `multiplayer` (with `invite()`), `ai` (BGen pictures, BAudio sounds, Batiyao AI answers), `capability`, `supports`, `getPurchases`, `consume`, `close`. |
 | [`miniapp/wingbeat/`](miniapp/wingbeat) | The sample game: saved best score, a consumable (golden feathers), a permanent purchase (night sky), and "Share my score" (a score card drawn on a canvas, offered with `share()`). Live on Batiyao — open Mini apps and play it. |
 | [`tools/miniapp-simulator.js`](tools/miniapp-simulator.js) | A stand-in for Batiyao on your machine: same sandbox, a payment sheet from your manifest, share and photo/video sheets, nicknames, a shared store and multiplayer across tabs, a log of every SDK call. |
 | [`tools/pack-miniapp.js`](tools/pack-miniapp.js) | Checks the folder against Batiyao's upload rules and zips it. |
@@ -185,7 +185,24 @@ reviews each version; if nobody acts within an hour it goes live by itself.
 The rules that shape the code:
 
 - **Bundle everything, with relative paths.** Nothing outside the folder
-  loads: no CDN, no remote font, no `fetch` to another host.
+  loads: no CDN, no remote font, no `fetch` to another host — except **at
+  most two addresses of your own**, declared in `manifest.json`:
+
+  ```json
+  "network": [{ "url": "https://api.example.com", "purpose": "Saves your scores to the weekly leaderboard." }]
+  ```
+
+  Each `url` is a bare `https://` base address (no path). A Batiyao admin
+  approves each one; until then, and for every other host, requests are
+  blocked. Your app may `fetch`, use WebSockets (`wss://` on the same host)
+  and show images, sound and video from an approved address — never load
+  scripts, styles or fonts from it. People and guardians see the addresses
+  before they open your app. Requests come from an opaque origin
+  (`Origin: null`) with no cookies: answer with CORS
+  (`Access-Control-Allow-Origin: *`) and authenticate with what your app
+  sends. Put `"network"` in `requires` if your app is useless offline. The
+  simulator lets declared addresses through as if approved. Details:
+  <https://developer.batiyao.com/miniapps.md> section 13.
 - **Batiyao draws the payment sheet, not you.** Call `Batiyao.pay({ product })`
   from a tap; the price and wording come from your reviewed manifest.
 - **Batiyao draws the share sheet too.** `Batiyao.share({ image: canvas, text })`
@@ -254,8 +271,24 @@ The rules that shape the code:
   Batiyao.multiplayer.send({ move: 'e4' });
   ```
 
+  **Invite links.** `Batiyao.multiplayer.invite()` (from a tap, while in a
+  match; check `supports('invite')`) opens Batiyao's own sheet with a link
+  to the match, `https://batiyao.com/apps/<your-app>?join=CODE`, to copy,
+  share or send. Whoever opens it gets your app with
+  `getContext().link = { join: 'CODE' }` — show a "Join" button and call
+  `join({ code })` from its tap. A link followed while your app is open
+  arrives as `Batiyao.on('link', ({ join }) => …)`. Like `share()`,
+  `invite()` resolves `{}` whatever the person did.
+
+  ```js
+  const { link } = await Batiyao.getContext();
+  if (link && link.join) joinButton.onclick = () => Batiyao.multiplayer.join({ code: link.join });
+  inviteButton.onclick = () => Batiyao.multiplayer.invite();
+  ```
+
   In the simulator every tab is its own player: open two to play against
-  yourself. `/?age=minor` makes a tab a child; `/?mp=off` and
+  yourself. Open `/?join=CODE` to start as if from an invite link, and use
+  "Follow a link…" to send the `link` event. `/?age=minor` makes a tab a child; `/?mp=off` and
   `/?mp=ask_guardian` (or the switch on the page) try the other answers.
 - **Credit, save, then consume.** Check `getPurchases()` at start-up and
   credit anything new before `consume()`, so nothing is lost if the app

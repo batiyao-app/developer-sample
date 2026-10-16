@@ -111,7 +111,7 @@ const code = (p) => p.then(() => 'resolved', (e) => e.code);
 
 test('pickImage and pickVideo check their options before asking Batiyao', async () => {
   const { Batiyao, sent } = sdkWith(() => ({ result: { status: 'cancelled' } }));
-  assert.strictEqual(Batiyao.version, '1.4.0');
+  assert.strictEqual(Batiyao.version, '1.5.0');
   for (const bad of [10, 5000, 1.5, '512']) assert.strictEqual(await code(Batiyao.pickImage({ max_size: bad })), 'INVALID');
   for (const bad of [0, 601, 'x', Infinity]) assert.strictEqual(await code(Batiyao.pickVideo({ max_seconds: bad })), 'INVALID');
   assert.strictEqual(sent.length, 0);
@@ -410,4 +410,117 @@ test('requires and capabilities follow the server rules', () => {
   one({ capabilities: { 'ai.image': { version: 1, purpose: 'Something long enough.', price: 1 } } }, 'unknown field');
   one({ requires: ['ai.audio'] }, 'must declare it too');
   one({ requires: ['teleport'] }, "isn't a Batiyao feature");
+});
+
+// --- 1.5.0: your own addresses ("network"), links and invites ---
+const rules = require('../lib/miniapp-rules');
+
+test('network addresses: the same origins the server accepts and refuses', () => {
+  const ok = {
+    'https://api.example.com': 'https://api.example.com',
+    'https://API.Example.com/': 'https://api.example.com',
+    'https://api.example.com:443': 'https://api.example.com',
+    'https://api.example.com:8443/': 'https://api.example.com:8443',
+    'https://xn--80ak6aa92e.com': 'https://xn--80ak6aa92e.com',
+    'https://scores.my-game.co.uk': 'https://scores.my-game.co.uk',
+  };
+  for (const [raw, want] of Object.entries(ok)) assert.strictEqual(rules.normalizeOrigin(raw), want, raw);
+  const bad = ['', ' https://a.com', 'http://api.example.com', 'wss://api.example.com', 'api.example.com',
+    'https://api.example.com/v1', 'https://api.example.com/?x=1', 'https://api.example.com/#a', 'https://api.example.com?',
+    'https://user:pw@api.example.com', 'https://*.example.com', 'https://127.0.0.1', 'https://[::1]',
+    'https://localhost', 'https://printer.local', 'https://batiyao.com', 'https://api.batiyao.com',
+    'https://miniapps.batiyao.com', 'https://exämple.com', 'https://com', 'https://api.example.com:0',
+    'https://api.example.com:99999', 'https://a.example.com:08443', 'https://a.example', 'javascript:alert(1)'];
+  for (const raw of bad) assert.throws(() => rules.normalizeOrigin(raw), undefined, raw);
+});
+
+test('network in the manifest: at most two, each with a purpose, no repeats', () => {
+  const files = readFolder(WINGBEAT);
+  const m = JSON.parse(files.find((f) => f.path === 'manifest.json').data);
+  const check = (net, requires) => checkBundle(withFile(files, 'manifest.json', JSON.stringify({ ...m, network: net, requires })));
+  assert.deepStrictEqual(check([{ url: 'https://api.example.com/', purpose: 'Saves your high scores.' }], ['network']).problems, []);
+  const has = (r, s) => r.problems.some((p) => p.includes(s));
+  assert.ok(has(check([{ url: 'https://a.example.com', purpose: 'One address here.' }, { url: 'https://A.example.com/', purpose: 'The same one again.' }]), 'listed twice'));
+  assert.ok(has(check(['a', 'b', 'c'].map((h) => ({ url: `https://${h}.example.com`, purpose: 'An address of ours.' }))), 'at most 2'));
+  assert.ok(has(check([{ url: 'https://a.example.com', purpose: 'short' }]), 'purpose'));
+  assert.ok(has(check([{ url: 'https://a.example.com', purpose: 'Long enough here.', why: 1 }]), 'unknown field "why"'));
+  assert.ok(has(check(undefined, ['network']), '"requires" has "network"'));
+  assert.deepStrictEqual(check(undefined, ['invite', 'multiplayer']).problems, []);
+});
+
+test('only media may come from a declared address, and sockets stop being flagged', () => {
+  const files = readFolder(WINGBEAT);
+  const m = JSON.parse(files.find((f) => f.path === 'manifest.json').data);
+  const withNet = withFile(files, 'manifest.json', JSON.stringify({ ...m, network: [{ url: 'https://api.example.com', purpose: 'Saves your high scores.' }] }));
+  const page = (html, set = withNet) => checkBundle(withFile(set, 'index.html', '<!doctype html>' + html)).problems.filter((p) => p.startsWith('index.html'));
+  assert.deepStrictEqual(page('<img src="https://api.example.com/a.png"><video poster=\'https://api.example.com/p.jpg\' src=https://api.example.com/v.mp4></video>' +
+    '<img srcset="https://api.example.com/a.png 1x, https://api.example.com/b.png 2x">'), []);
+  for (const html of ['<img src="https://evil.example.org/a.png">', '<img src="https://api.example.com.evil.org/a.png">',
+    '<img srcset="https://api.example.com/a.png 1x, https://evil.org/b.png 2x">', '<script src="https://api.example.com/lib.js"></script>',
+    '<link rel="stylesheet" href="https://api.example.com/s.css">', '<a href="https://api.example.com/">x</a>',
+    '<form action="https://api.example.com/post"></form>']) {
+    assert.strictEqual(page(html).length, 1, html);
+  }
+  assert.strictEqual(page('<img src="https://api.example.com/a.png">', files).length, 1, 'undeclared');
+  assert.ok(checkBundle(withFile(withNet, 'style.css', 'a{background:url(https://api.example.com/a.png)}')).problems.some((p) => p.startsWith('style.css')));
+  const js = 'new WebSocket("wss://api.example.com"); new RTCPeerConnection()';
+  assert.deepStrictEqual(checkBundle(withFile(withNet, 'net.js', js)).flags, ['Uses WebRTC (RTCPeerConnection)']);
+  assert.strictEqual(checkBundle(withFile(files, 'net.js', js)).flags.length, 2);
+});
+
+test('the sandbox names declared addresses for data and media only', () => {
+  const base = 'http://localhost:3100/app/';
+  const none = simulator.fileHeaders(base);
+  assert.strictEqual(none['Connection-Allowlist'], '(response-origin)');
+  assert.match(none['Content-Security-Policy'], /connect-src http:\/\/localhost:3100\/app\/ data: blob:;/);
+  const h = simulator.fileHeaders(base, ['https://api.example.com']);
+  const csp = h['Content-Security-Policy'];
+  for (const d of ['connect-src', 'img-src', 'media-src']) assert.ok(csp.includes(`${d} ${base} data: blob: https://api.example.com wss://api.example.com;`), d);
+  for (const part of csp.split(';')) {
+    if (/^\s*(script-src|style-src|font-src|worker-src|frame-src)\b/.test(part)) assert.ok(!part.includes('example.com'), part);
+  }
+  assert.strictEqual(h['Connection-Allowlist'], '(response-origin "https://api.example.com/*" "wss://api.example.com/*")');
+  assert.strictEqual(rules.connectionAllowlist(['https://a.example.com:8443']), '(response-origin "https://a.example.com:8443/*" "wss://a.example.com:8443/*")');
+});
+
+test('invite() asks Batiyao, and the link and supports() know it', async () => {
+  const { Batiyao, sent, emit } = sdkWith((m) => ({ result: m === 'getContext' ? { features: ['multiplayer', 'invite'], link: { join: 'ABC234' } } : {} }));
+  assert.strictEqual(asJSON(await Batiyao.multiplayer.invite()), '{}');
+  assert.strictEqual(asJSON(sent.map((m) => [m.method, m.params])), asJSON([['mp.invite', {}]]));
+  assert.strictEqual((await Batiyao.getContext()).link.join, 'ABC234');
+  assert.strictEqual(await Batiyao.supports('invite'), true);
+  assert.strictEqual(await Batiyao.supports('multiplayer.invite'), true);
+  let got = null;
+  Batiyao.on('link', (d) => { got = d; });
+  emit('link', { join: 'XYZ789' });
+  assert.strictEqual(asJSON(got), '{"join":"XYZ789"}');
+
+  const older = sdkWith((m) => (m === 'getContext' ? { result: { features: ['multiplayer'] } } : { error: { code: 'UNKNOWN_METHOD', message: 'no' } })).Batiyao;
+  assert.strictEqual(await older.supports('multiplayer.invite'), false);
+  assert.strictEqual(await code(older.multiplayer.invite()), 'UNKNOWN_METHOD');
+});
+
+test('the simulator starts from a link, invites, and lets declared addresses through', async () => {
+  const dir = require('node:fs').mkdtempSync(path.join(require('node:os').tmpdir(), 'mini-'));
+  for (const f of readFolder(WINGBEAT)) {
+    require('node:fs').mkdirSync(path.join(dir, path.dirname(f.path)), { recursive: true });
+    let data = f.data;
+    if (f.path === 'manifest.json') data = Buffer.from(JSON.stringify({ ...JSON.parse(f.data), network: [{ url: 'https://api.example.com', purpose: 'Saves your high scores.' }] }));
+    require('node:fs').writeFileSync(path.join(dir, f.path), data);
+  }
+  const server = simulator.main([dir, '--port', '31097']);
+  await new Promise((r) => server.once('listening', r));
+  try {
+    const html = await (await fetch('http://127.0.0.1:31097/?join=abc234')).text();
+    new (require('node:vm').Script)(html.split('<script>')[1].split('</script>')[0]);
+    assert.match(html, /id="invite-sheet"/);
+    assert.match(html, /'mp\.invite':/);
+    assert.match(html, /if \(LINK\) ctx\.link = LINK;/);
+    assert.match(html, /const SLUG = "wingbeat";/);
+    const page = await fetch('http://127.0.0.1:31097/app/index.html');
+    assert.ok(page.headers.get('content-security-policy').includes('connect-src http://localhost:31097/app/ data: blob: https://api.example.com wss://api.example.com'));
+    assert.strictEqual(page.headers.get('connection-allowlist'), '(response-origin "https://api.example.com/*" "wss://api.example.com/*")');
+  } finally {
+    server.close();
+  }
 });

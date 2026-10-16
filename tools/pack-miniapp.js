@@ -13,7 +13,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
-const { checkBundle } = require('../lib/miniapp-rules');
+const { checkBundle, origins } = require('../lib/miniapp-rules');
 
 function crc32(buf) {
   let c;
@@ -112,6 +112,9 @@ function main(argv) {
   }
   const { problems, flags, manifest } = checkBundle(files);
   for (const f of flags) console.warn(`note: ${f} — an admin will look at this before it goes live.`);
+  for (const o of origins(manifest || {})) {
+    console.warn(`note: connects to ${o} — an admin approves each address the first time a version uses it; anything else stays blocked.`);
+  }
   if (problems.length) {
     console.error(`Not packed. Fix these first:\n  - ${problems.join('\n  - ')}`);
     return 1;

@@ -24,12 +24,22 @@
  *   ask). Declare each in manifest.json "capabilities"; Batiyao decides.
  *   capability() says whether it works here. On the website and on phones
  *   that can't run it, it resolves { status: 'unavailable' }.
+ * 1.5.0 (2026-10-16): links and the network. multiplayer.invite() opens
+ *   Batiyao's invite sheet with a link to the match
+ *   (https://batiyao.com/apps/<slug>?join=CODE); an app opened from such a
+ *   link reads getContext().link ({ join: CODE }), and a link followed while
+ *   it runs arrives as the 'link' event. Your app may reach at most two
+ *   addresses of your own, declared in manifest.json "network" and each
+ *   approved by a Batiyao admin; everything else stays blocked. Requests come
+ *   from an opaque origin (Origin: null) with no cookies, so your server
+ *   answers with CORS (Access-Control-Allow-Origin: *) and authenticates with
+ *   what your app sends.
  */
 (function (global) {
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.4.0';
+  var VERSION = '1.5.0';
   var pending = Object.create(null);
   var listeners = Object.create(null);
   var counter = 0;
@@ -104,7 +114,7 @@
     'getPurchases', 'consume', 'close', 'on', 'off', 'supports'];
   var LEGACY_FEATURES = ['pay', 'share'];
   // Method names that belong to one listed feature.
-  var FEATURE_OF = { getNickname: 'nickname', 'ai.image.generate': 'ai.image', 'ai.audio.generate': 'ai.audio', 'ai.ask': 'ai.assistant' };
+  var FEATURE_OF = { getNickname: 'nickname', 'multiplayer.invite': 'invite', 'ai.image.generate': 'ai.image', 'ai.audio.generate': 'ai.audio', 'ai.ask': 'ai.assistant' };
   var AI_CAPABILITIES = ['ai.image', 'ai.audio', 'ai.assistant'];
   var IMAGE_QUALITY = ['fast', 'balanced', 'best'];
   var AUDIO_SECONDS = { music: [8, 15, 30], sound: [3, 6, 12] };
@@ -181,8 +191,10 @@
 
     /**
      * Who and where: { app_user_id, platform, locale, theme, version,
-     * test_mode, access, features }. features lists the optional methods this
-     * Batiyao has (e.g. 'pickImage'); an older Batiyao leaves it out. app_user_id is the same for this person every
+     * test_mode, access, features, link? }. features lists the optional methods this
+     * Batiyao has (e.g. 'pickImage', 'invite', 'network'); an older Batiyao leaves it out.
+     * link is { join: 'ABC234' } when the person opened your app from an
+     * invite link (multiplayer.invite()); join the match from a tap. app_user_id is the same for this person every
      * time in your app, and different in every other app. Batiyao never gives
      * a mini app the person's name, contacts or location.
      */
@@ -605,6 +617,18 @@
         global.parent.postMessage({ batiyao: PROTOCOL, id: 's' + counter + '-' + Date.now().toString(36), method: 'mp.send', params: params }, '*');
         return Promise.resolve({});
       },
+      /**
+       * Invite people to the match you're in: Batiyao opens its own sheet
+       * with a link to it (https://batiyao.com/apps/<slug>?join=CODE) and the
+       * code, to copy, share or send. Whoever opens the link gets your app
+       * with getContext().link = { join: CODE }. Call it from a tap, while in
+       * a match (NOT_IN_MATCH otherwise). Resolves {} when the sheet closes,
+       * whatever the person did: your app is never told whether they shared.
+       * Check supports('invite'): older Batiyao apps reject UNKNOWN_METHOD.
+       */
+      invite: function () {
+        return send('mp.invite', {});
+      },
       /** Leave the match you're in. */
       leave: function () {
         return send('mp.leave', {}, 20000);
@@ -629,7 +653,9 @@
 
     /**
      * Events from Batiyao: 'theme' ({ theme }), 'visibility' ({ visible }),
-     * 'nickname' ({ nickname }: the person changed it from Batiyao's menu).
+     * 'nickname' ({ nickname }: the person changed it from Batiyao's menu),
+     * 'link' ({ join }: the person followed an invite link to your app while
+     * it was open).
      * Multiplayer events arrive as 'mp.joined' etc.; multiplayer.on() is the
      * same thing without the prefix.
      */

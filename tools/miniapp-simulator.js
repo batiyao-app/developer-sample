@@ -32,6 +32,16 @@
 // you can build the flow. The real ones run on a phone. Try the other
 // answers with the page's AI switch, or /?ai=needs_download, /?ai=unavailable.
 //
+// Network (SDK 1.5.0): the addresses your manifest declares in "network"
+// are let through as if a Batiyao admin had approved them all (connect-src,
+// img-src and media-src, https and wss); every other host stays blocked.
+//
+// Links and invites (SDK 1.5.0): open http://localhost:3100/?join=ABC234 to
+// start the app as if from an invite link (getContext().link is
+// { join: 'ABC234' }); the page's "Follow a link" button sends the 'link'
+// event to a running app. multiplayer.invite() shows Batiyao's invite sheet
+// with the link to the match.
+//
 // It is a convenience, not the judge: before you upload, test on Batiyao
 // itself (Built by me → your app → Test), which runs the real host.
 'use strict';
@@ -39,7 +49,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
-const { checkBundle } = require('../lib/miniapp-rules');
+const { checkBundle, origins, sourceList, connectionAllowlist } = require('../lib/miniapp-rules');
 const { readFolder } = require('./pack-miniapp');
 const social = require('../lib/miniapp-social');
 
@@ -65,20 +75,28 @@ const GUARD = '<script>(function(){["RTCPeerConnection","webkitRTCPeerConnection
   'window.addEventListener("click",function(e){var t=e.target;if(!(t instanceof Element))return;var l=t.closest("label");if(isFL(t)||(l&&isFL(l)))e.preventDefault()},true)' +
   '})();</script>';
 
-function fileHeaders(base) {
+// net: the declared addresses, as Batiyao names approved ones — data,
+// images, sound and video only, never scripts, styles or fonts.
+function fileHeaders(base, net = []) {
+  const extra = net.length ? ' ' + sourceList(net).join(' ') : '';
   return {
     'Content-Security-Policy': [
       'sandbox allow-scripts allow-forms', "default-src 'none'",
       `script-src ${base} 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'`, `style-src ${base} 'unsafe-inline'`,
-      `img-src ${base} data: blob:`, `media-src ${base} data: blob:`, `font-src ${base} data:`,
-      `connect-src ${base} data: blob:`, 'worker-src blob:', "frame-src 'none'", "object-src 'none'",
+      `img-src ${base} data: blob:${extra}`, `media-src ${base} data: blob:${extra}`, `font-src ${base} data:`,
+      `connect-src ${base} data: blob:${extra}`, 'worker-src blob:', "frame-src 'none'", "object-src 'none'",
       "form-action 'none'", "base-uri 'none'",
     ].join('; '),
+    'Connection-Allowlist': connectionAllowlist(net),
     'Access-Control-Allow-Origin': '*',
     'Cross-Origin-Resource-Policy': 'cross-origin',
     'Cache-Control': 'no-store',
   };
 }
+
+// The address Batiyao gives the app (the real one is shown on your app's
+// page); the simulator makes one from the name.
+const slugOf = (manifest) => String(manifest.name || 'app').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'app';
 
 const HOST_PAGE = (manifest) => `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -126,6 +144,12 @@ const HOST_PAGE = (manifest) => `<!doctype html>
     <p id="nk-problem" style="color:#b91c1c;display:none"></p>
     <div class="row" style="margin-top:10px"><button id="nk-cancel">Cancel</button><button id="nk-more">More names</button></div>
   </div></div>
+  <div id="invite-sheet" class="sheetlike"><div class="card">
+    <p><b>Invite to ${manifest.name.replace(/[<&]/g, '')}</b><br><small>The sheet Batiyao draws: copy the link, or share or send it</small></p>
+    <p class="note">Code <b id="iv-code"></b><br><span id="iv-link" style="word-break:break-all"></span></p>
+    <p class="note">Whoever opens the link gets your app with getContext().link = { join: code }. Your app is only told that the sheet closed.</p>
+    <div class="row"><button id="iv-close">Close</button><button id="iv-copy" class="pay">Copy link</button></div>
+  </div></div>
   <div id="mp-sheet" class="sheetlike"><div class="card">
     <p><b>Playing online</b></p>
     <p class="note">A guardian needs to allow playing online in mini apps for this account. (Simulated: your app will hear "unavailable".)</p>
@@ -139,7 +163,7 @@ const HOST_PAGE = (manifest) => `<!doctype html>
   </div></div>
 </div>
 <div><div id="tools"><button id="clear-storage">Clear saved data</button><button id="clear-purchases">Clear purchases</button><button id="visibility">Send visibility: hidden, then visible</button><label><input type="checkbox" id="pick-unavailable"> Photos and videos: unavailable (a child without the guardian's switch)</label><br>
-<button id="nickname">Nickname in this app</button><button id="clear-shared">Clear the shared store</button>
+<button id="nickname">Nickname in this app</button><button id="follow-link">Follow a link…</button><button id="clear-shared">Clear the shared store</button>
 <label>Batiyao's AI: <select id="ai-mode"><option value="ready">ready</option><option value="needs_download">needs a download</option><option value="unavailable">unavailable</option></select></label>
 <label>Multiplayer: <select id="mp-mode"><option value="on">on</option><option value="off">off for this app</option><option value="ask_guardian">a child without the guardian's switch</option></select></label>
 <span id="who"></span></div><div id="log"></div></div>
@@ -156,6 +180,10 @@ let paying = null;
 let sharing = null;
 let picking = null;
 const QS = new URLSearchParams(location.search);
+// Opened from an invite link: https://batiyao.com/apps/<slug>?join=CODE.
+const CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/;
+const LINK = CODE_RE.test((QS.get('join') || '').toUpperCase()) ? { join: QS.get('join').toUpperCase() } : null;
+const SLUG = ${JSON.stringify(slugOf(manifest))};
 if (QS.get('pick') === 'unavailable') document.getElementById('pick-unavailable').checked = true;
 if (['off', 'ask_guardian'].includes(QS.get('mp'))) document.getElementById('mp-mode').value = QS.get('mp');
 const MINOR = QS.get('age') === 'minor';
@@ -167,7 +195,7 @@ if (['needs_download', 'unavailable'].includes(QS.get('ai'))) document.getElemen
 const aiMode = () => document.getElementById('ai-mode').value;
 const DECLARED = MANIFEST.capabilities || {};
 const aiCaps = () => Object.fromEntries(Object.entries(DECLARED).map(([n, c]) => [n, { version: c.version, state: aiMode(), tools: c.tools || [] }]));
-const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname'].concat(mpMode() === 'off' ? [] : ['multiplayer'])
+const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname', 'network'].concat(mpMode() === 'off' ? [] : ['multiplayer', 'invite'])
   .concat(aiMode() === 'unavailable' ? [] : Object.keys(DECLARED));
 let aiRunning = null;
 let nicking = null;
@@ -207,7 +235,11 @@ function handle(m) {
   const bad = (code, message) => reply(m.id, null, { code, message });
   switch (m.method) {
     case 'ready': return reply(m.id, {});
-    case 'getContext': return reply(m.id, { app_user_id: PLAYER, platform: 'web', locale: navigator.language, theme: 'light', version: MANIFEST.version, test_mode: true, access: { type: MANIFEST.access.type, active: true }, features: features(), capabilities: aiCaps() });
+    case 'getContext': {
+      const ctx = { app_user_id: PLAYER, platform: 'web', locale: navigator.language, theme: 'light', version: MANIFEST.version, test_mode: true, access: { type: MANIFEST.access.type, active: true }, features: features(), capabilities: aiCaps() };
+      if (LINK) ctx.link = LINK;
+      return reply(m.id, ctx);
+    }
     case 'storage.get': if (!KEYRE.test(p.key)) return bad('INVALID_KEY', 'bad key'); return reply(m.id, { value: storage[p.key] ?? null });
     case 'storage.set':
       if (!KEYRE.test(p.key)) return bad('INVALID_KEY', 'bad key');
@@ -412,7 +444,7 @@ document.getElementById('pk-input').onchange = async (e) => {
 };
 document.getElementById('sh-cancel').onclick = () => endShare('cancel');
 // --- nicknames, the shared store, multiplayer (state is in the simulator's Node process) ---
-const busy = () => !!(paying || sharing || picking || nicking);
+const busy = () => !!(paying || sharing || picking || nicking || inviting);
 const tapped = () => !navigator.userActivation || navigator.userActivation.isActive;
 async function api(op, params) {
   const res = await fetch('/sim/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ op, player: PLAYER, minor: MINOR }, params || {})) });
@@ -467,7 +499,7 @@ document.getElementById('nickname').onclick = async () => {
   if (nickname) event('nickname', { nickname });
 };
 document.getElementById('clear-shared').onclick = async () => { await api('db.clear'); log('shared store cleared', 'ev'); };
-let es = null, CONN = null, inMatch = false;
+let es = null, CONN = null, inMatch = false, matchCode = null, inviting = null;
 function ensureConn() {
   if (es) return Promise.resolve();
   CONN = 'c' + Math.random().toString(36).slice(2, 10);
@@ -476,7 +508,7 @@ function ensureConn() {
     es.onopen = () => resolve();
     es.onmessage = (e) => {
       const ev = JSON.parse(e.data);
-      if (ev.type === 'closed') inMatch = false;
+      if (ev.type === 'closed') { inMatch = false; matchCode = null; }
       event('mp.' + ev.type, ev.data);
     };
     es.onerror = () => {
@@ -504,6 +536,7 @@ async function enterMatch(m, p, op) {
   const r = await api(op, Object.assign({}, p, { conn: CONN }));
   if (r.error) return reply(m.id, null, r.error);
   inMatch = true;
+  matchCode = r.result.match && r.result.match.code;
   reply(m.id, { status: 'joined', match: r.result.match });
 }
 const SOCIAL = {
@@ -525,12 +558,43 @@ const SOCIAL = {
   'mp.join': (m, p) => enterMatch(m, p, 'mp.join'),
   'mp.list': async (m) => { if (mpMode() === 'off') return reply(m.id, { matches: [] }); try { await ensureConn(); } catch (e) { return reply(m.id, null, { code: 'OFFLINE', message: 'No connection to the simulator.' }); } return relay(m, 'mp.list', { conn: CONN }); },
   'mp.send': async (m, p) => { if (!CONN) return reply(m.id, null, { code: 'NOT_IN_MATCH', message: "You're not in a match." }); return relay(m, 'mp.send', { conn: CONN, data: p.data, to: p.to }); },
+  // Batiyao's invite sheet: the link to this match. Like share(), the app
+  // only hears that the sheet closed.
+  'mp.invite': async (m) => {
+    if (busy()) return reply(m.id, null, { code: 'BUSY', message: 'Batiyao is already showing a sheet.' });
+    if (!tapped()) return reply(m.id, null, { code: 'NEEDS_TAP', message: 'Call multiplayer.invite() from a tap or click.' });
+    if (!CONN || !inMatch || !matchCode) return reply(m.id, null, { code: 'NOT_IN_MATCH', message: "You're not in a match." });
+    inviting = m.id;
+    const link = 'https://batiyao.com/apps/' + SLUG + '?join=' + matchCode;
+    document.getElementById('iv-code').textContent = matchCode;
+    document.getElementById('iv-link').textContent = link;
+    document.getElementById('invite-sheet').style.display = 'flex';
+  },
   'mp.leave': async (m) => {
     if (!CONN) return reply(m.id, null, { code: 'NOT_IN_MATCH', message: "You're not in a match." });
     const r = await api('mp.leave', { conn: CONN });
     if (!r.error) inMatch = false;
     if (r.error) reply(m.id, null, r.error); else reply(m.id, r.result);
   },
+};
+function endInvite(how) {
+  document.getElementById('invite-sheet').style.display = 'none';
+  const id = inviting; inviting = null;
+  log('the person chose: ' + how + ' (your app only hears that the sheet closed)', 'ev');
+  if (id) reply(id, {});
+}
+document.getElementById('iv-close').onclick = () => endInvite('close');
+document.getElementById('iv-copy').onclick = () => {
+  const link = document.getElementById('iv-link').textContent;
+  (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).catch(() => {});
+  log('copied ' + link + ' (open it here as ' + location.origin + '/?join=' + matchCode + ')', 'ev');
+  endInvite('copy');
+};
+document.getElementById('follow-link').onclick = () => {
+  const code = (prompt('A match code from an invite link (6 letters and digits):') || '').trim().toUpperCase();
+  if (!CODE_RE.test(code)) return log('not a match code: ' + code, 'err');
+  frame.contentWindow.postMessage({ batiyao: 1, event: 'link', data: { join: code } }, '*');
+  log('event link ' + JSON.stringify({ join: code }), 'ev');
 };
 document.getElementById('reload').onclick = () => { frame.src = frame.src; };
 document.getElementById('clear-storage').onclick = () => { save(':storage', {}); log('saved data cleared', 'ev'); };
@@ -824,6 +888,8 @@ function main(argv) {
   }
   for (const p of problems) console.warn(`upload would refuse: ${p}`);
   for (const f of flags) console.warn(`note: ${f} — an admin will look at this before it goes live.`);
+  const net = origins(manifest);
+  for (const o of net) console.log(`network: ${o} is let through (on Batiyao, only once an admin approves it)`);
 
   const base = `http://localhost:${port}/app/`;
   const sim = createSimState();
@@ -850,7 +916,7 @@ function main(argv) {
         const m = page.match(/^﻿?\s*<!doctype[^>]*>/i);
         data = Buffer.from(m ? m[0] + GUARD + page.slice(m[0].length) : GUARD + page);
       }
-      res.writeHead(200, { 'Content-Type': TYPES[ext] || 'application/octet-stream', ...fileHeaders(base) });
+      res.writeHead(200, { 'Content-Type': TYPES[ext] || 'application/octet-stream', ...fileHeaders(base, net) });
       return res.end(data);
     }
     res.writeHead(404);
@@ -868,4 +934,4 @@ if (require.main === module) {
   if (typeof r === 'number') process.exit(r);
 }
 
-module.exports = { main, createSimState, simOp, mpOp, sweepMatches };
+module.exports = { main, createSimState, simOp, mpOp, sweepMatches, fileHeaders, slugOf };
