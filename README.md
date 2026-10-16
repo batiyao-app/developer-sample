@@ -319,7 +319,11 @@ The rules that shape the code:
   **Invite links.** `Batiyao.multiplayer.invite()` (from a tap, while in a
   match; check `supports('invite')`) opens Batiyao's own sheet with a link
   to the match, `https://batiyao.com/apps/<your-app>?join=CODE`, to copy,
-  share or send. Whoever opens it gets your app with
+  share outside Batiyao, or send in a Batiyao chat / post on Batiyao. Or put
+  the invite in your own Share button: `Batiyao.share({ invite: true, text,
+  image })` (SDK 1.7.0, `supports('shareInvite')`) — the post or chat message
+  then ends with that join link instead of the plain link to your app;
+  Batiyao finds the code itself, and a story can't carry it. Whoever opens it gets your app with
   `getContext().link = { join: 'CODE' }` — show a "Join" button and call
   `join({ code })` from its tap. A link followed while your app is open
   arrives as `Batiyao.on('link', ({ join }) => …)`. Like `share()`,

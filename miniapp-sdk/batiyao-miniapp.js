@@ -34,6 +34,9 @@
  *   from an opaque origin (Origin: null) with no cookies, so your server
  *   answers with CORS (Access-Control-Allow-Origin: *) and authenticates with
  *   what your app sends.
+ * 1.7.0 (2026-10-16): share({ invite: true }) — while the person is in a
+ *   match, the post or chat message links into it (…/apps/<slug>?join=CODE),
+ *   so whoever taps it joins. Batiyao finds the code; stories can't invite.
  * 1.6.0 (2026-10-16): files and media sharing. Batiyao.files keeps your
  *   app's own pictures, sounds and videos on this device (save, get, list,
  *   remove, usage): one space per person and app, 200 MB, never uploaded.
@@ -46,7 +49,7 @@
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.6.0';
+  var VERSION = '1.7.0';
   var pending = Object.create(null);
   var listeners = Object.create(null);
   var counter = 0;
@@ -295,14 +298,25 @@
       if (audio && audio.size > SHARE_AUDIO_MAX_BYTES) {
         return Promise.reject(makeError('AUDIO_TOO_LARGE', 'A sound to share is at most 10 MB.'));
       }
-      if (!image && !text && !video && !audio) {
+      if (options.invite != null && typeof options.invite !== 'boolean') {
+        return Promise.reject(makeError('INVALID', 'share() invite is true or false.'));
+      }
+      var invite = options.invite === true;
+      if (!image && !text && !video && !audio && !invite) {
         return Promise.reject(makeError('INVALID', 'share() needs a picture, a video, a sound, text, or a mix.'));
       }
       var params = { image: image || '', text: text };
-      if (!video && !audio) return send('share', params);
       if (video) params.video = video;
       if (audio) params.audio = audio;
-      return withFeature('shareMedia', 'share', function () { return send('share', params); });
+      if (invite) params.invite = true;
+      var go = function () { return send('share', params); };
+      // A Batiyao without these would share without them: refuse instead.
+      if (invite && (video || audio)) {
+        return withFeature('shareInvite', 'share', function () { return withFeature('shareMedia', 'share', go); });
+      }
+      if (invite) return withFeature('shareInvite', 'share', go);
+      if (video || audio) return withFeature('shareMedia', 'share', go);
+      return go();
     },
 
     /**

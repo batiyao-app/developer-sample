@@ -206,7 +206,7 @@ const DECLARED = MANIFEST.capabilities || {};
 const CAPS_DECLINED = new Set();
 const capState = (n) => (CAPS_DECLINED.has(n) ? 'unavailable' : aiMode());
 const aiCaps = () => Object.fromEntries(Object.entries(DECLARED).map(([n, c]) => [n, { version: c.version, state: capState(n), tools: c.tools || [] }]));
-const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname', 'network', 'files', 'shareMedia'].concat(mpMode() === 'off' ? [] : ['multiplayer', 'invite'])
+const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname', 'network', 'files', 'shareMedia'].concat(mpMode() === 'off' ? [] : ['multiplayer', 'invite', 'shareInvite'])
   .concat(aiMode() === 'unavailable' ? [] : Object.keys(DECLARED).filter((n) => !CAPS_DECLINED.has(n)));
 let aiRunning = null;
 let nicking = null;
@@ -295,7 +295,10 @@ function handle(m) {
       if (/(^|[^\\p{L}\\p{N}_])@[\\p{L}\\p{N}_]/u.test(text)) return bad('INVALID_TEXT', 'Suggested text can\\'t tag people (@).');
       if (/(^|[^\\p{L}\\p{N}_&])#[\\p{L}\\p{N}_]/u.test(text)) return bad('INVALID_TEXT', 'Suggested text can\\'t contain hashtags (#).');
       if (/(https?:\\/\\/|www\\.)/i.test(text)) return bad('INVALID_TEXT', 'Suggested text can\\'t contain links.');
-      if (!img && !text && !video && !audio) return bad('INVALID', 'share() needs a picture, a video, a sound, text, or a mix.');
+      // share({ invite: true }) (1.7.0): the link joins the person's match.
+      const invite = p.invite === true;
+      if (invite && !(inMatch && matchCode)) return bad('NOT_IN_MATCH', 'share({ invite: true }) works while the person is in a match.');
+      if (!img && !text && !video && !audio && !invite) return bad('INVALID', 'share() needs a picture, a video, a sound, text, or a mix.');
       sharing = m.id;
       const media = video || audio;
       const showSheet = (seconds) => {
@@ -314,7 +317,10 @@ function handle(m) {
             + (video ? 'MP4, at most 1280 px and 30 frames a second' : 'M4A; in a post or story it becomes a video of '
             + (img ? 'the picture' : 'your app\\'s icon') + ' with the sound') + ') and can go to ' + story + '.';
         }
-        document.getElementById('sh-text').textContent = text;
+        document.getElementById('sh-text').textContent = invite
+          ? (text || 'Join me in ' + MANIFEST.name + '!') + '\\n\\nJoin my game in ' + MANIFEST.name + ': https://batiyao.com/apps/' + SLUG + '?join=' + matchCode
+            + '\\n(Post or Chat; a story cannot carry the link.)'
+          : text;
         document.getElementById('share-sheet').style.display = 'flex';
       };
       if (!media) { showSheet(0); return; }

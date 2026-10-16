@@ -111,7 +111,7 @@ const code = (p) => p.then(() => 'resolved', (e) => e.code);
 
 test('pickImage and pickVideo check their options before asking Batiyao', async () => {
   const { Batiyao, sent } = sdkWith(() => ({ result: { status: 'cancelled' } }));
-  assert.strictEqual(Batiyao.version, '1.6.0');
+  assert.strictEqual(Batiyao.version, '1.7.0');
   for (const bad of [10, 5000, 1.5, '512']) assert.strictEqual(await code(Batiyao.pickImage({ max_size: bad })), 'INVALID');
   for (const bad of [0, 601, 'x', Infinity]) assert.strictEqual(await code(Batiyao.pickVideo({ max_seconds: bad })), 'INVALID');
   assert.strictEqual(sent.length, 0);
@@ -648,4 +648,28 @@ test('files and shareMedia may be listed in "requires"', () => {
   const m = JSON.parse(files.find((f) => f.path === 'manifest.json').data);
   const { problems } = checkBundle(withFile(files, 'manifest.json', JSON.stringify({ ...m, requires: ['files', 'shareMedia'] })));
   assert.deepStrictEqual(problems.filter((p) => /requires/.test(p)), []);
+});
+
+// --- 1.7.0: share({ invite: true }) ---
+test('share({ invite: true }) needs a Batiyao that has it, and asks for nothing but the flag', async () => {
+  const newer = sdkWith((m) => (m === 'getContext' ? { result: { features: ['share', 'shareInvite', 'shareMedia'] } } : { result: {} }));
+  assert.strictEqual(await code(newer.Batiyao.share({ invite: true })), 'resolved');
+  const shared = newer.sent.find((x) => x.method === 'share');
+  assert.strictEqual(JSON.stringify(shared.params), JSON.stringify({ image: '', text: '', invite: true }));
+  assert.strictEqual(await code(newer.Batiyao.share({ invite: 'yes' })), 'INVALID');
+  const older = sdkWith((m) => (m === 'getContext' ? { result: { features: ['share'] } } : { result: {} }));
+  assert.strictEqual(await code(older.Batiyao.share({ invite: true, text: 'Race me' })), 'UNKNOWN_METHOD');
+  assert.ok(!older.sent.some((x) => x.method === 'share'), 'an older Batiyao is never asked to share without the link');
+});
+
+test('the simulator shares an invite only from a match', async () => {
+  const server = simulator.main([WINGBEAT, '--port', '31096']);
+  await new Promise((r) => server.once('listening', r));
+  try {
+    const html = await (await fetch('http://127.0.0.1:31096/')).text();
+    assert.match(html, /share\(\{ invite: true \}\) works while the person is in a match/);
+    assert.match(html, /'shareInvite'/);
+  } finally {
+    server.close();
+  }
 });
