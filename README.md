@@ -192,7 +192,10 @@ The rules that shape the code:
   "network": [{ "url": "https://api.example.com", "purpose": "Saves your scores to the weekly leaderboard." }]
   ```
 
-  Each `url` is a bare `https://` base address (no path). A Batiyao admin
+  Each `url` is a bare `https://` base address (no path). `https://*.example.com`
+  is example.com **and all its subdomains**; it is its own entry, approved
+  explicitly (approving example.com never covers a subdomain), and it must be
+  over a domain you own — `*.com`, `*.co.uk`, `*.github.io` are refused. A Batiyao admin
   approves each one; until then, and for every other host, requests are
   blocked. Your app may `fetch`, use WebSockets (`wss://` on the same host)
   and show images, sound and video from an approved address — never load

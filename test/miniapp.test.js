@@ -423,15 +423,32 @@ test('network addresses: the same origins the server accepts and refuses', () =>
     'https://api.example.com:8443/': 'https://api.example.com:8443',
     'https://xn--80ak6aa92e.com': 'https://xn--80ak6aa92e.com',
     'https://scores.my-game.co.uk': 'https://scores.my-game.co.uk',
+    'https://*.Example.com/': 'https://*.example.com',
+    'https://*.my-game.co.uk:8443': 'https://*.my-game.co.uk:8443',
   };
   for (const [raw, want] of Object.entries(ok)) assert.strictEqual(rules.normalizeOrigin(raw), want, raw);
   const bad = ['', ' https://a.com', 'http://api.example.com', 'wss://api.example.com', 'api.example.com',
     'https://api.example.com/v1', 'https://api.example.com/?x=1', 'https://api.example.com/#a', 'https://api.example.com?',
-    'https://user:pw@api.example.com', 'https://*.example.com', 'https://127.0.0.1', 'https://[::1]',
+    'https://user:pw@api.example.com', 'https://api.*.example.com', 'https://*.*.example.com', 'https://*.com',
+    'https://*.co.uk', 'https://*.github.io', 'https://*.vercel.app', 'https://*.batiyao.com', 'https://127.0.0.1', 'https://[::1]',
     'https://localhost', 'https://printer.local', 'https://batiyao.com', 'https://api.batiyao.com',
     'https://miniapps.batiyao.com', 'https://exämple.com', 'https://com', 'https://api.example.com:0',
     'https://api.example.com:99999', 'https://a.example.com:08443', 'https://a.example', 'javascript:alert(1)'];
   for (const raw of bad) assert.throws(() => rules.normalizeOrigin(raw), undefined, raw);
+});
+
+test('a wildcard is the domain and all its subdomains, and only that', () => {
+  const w = 'https://*.example.com';
+  assert.ok(rules.isWildcard(w));
+  assert.strictEqual(rules.networkLabel(w), 'example.com and all its subdomains');
+  assert.strictEqual(rules.sourceList([w]).join(' '), 'https://example.com https://*.example.com wss://example.com wss://*.example.com');
+  assert.strictEqual(rules.connectionAllowlist([w]),
+    '(response-origin "https://example.com/*" "https://*.example.com/*" "wss://example.com/*" "wss://*.example.com/*")');
+  for (const [u, ok] of Object.entries({ 'https://example.com/a': true, 'https://a.b.example.com/': true, 'wss://live.example.com/x': true,
+    'https://notexample.com/': false, 'https://example.com.evil.org/': false, 'https://api.example.com:8443/': false })) {
+    assert.strictEqual(rules.originAllows(w, u), ok, u);
+  }
+  assert.strictEqual(rules.originAllows('https://api.example.com', 'https://x.api.example.com/'), false);
 });
 
 test('network in the manifest: at most two, each with a purpose, no repeats', () => {
