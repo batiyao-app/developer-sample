@@ -557,8 +557,8 @@ test('the simulator starts from a link, invites, and lets declared addresses thr
     await op({ op: 'admin.set', kind: 'network', name: 'https://api.example.com', approved: true });
     const back = await fetch('http://127.0.0.1:31097/app/index.html');
     assert.ok(back.headers.get('content-security-policy').includes('https://api.example.com'));
-    const html = await (await fetch('http://127.0.0.1:31097/')).text();
-    assert.match(html, /Admin review \(simulated\)/);
+    const page2 = await (await fetch('http://127.0.0.1:31097/')).text();
+    assert.match(page2, /Admin review \(simulated\)/);
   } finally {
     server.close();
   }
