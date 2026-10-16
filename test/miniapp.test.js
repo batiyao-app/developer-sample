@@ -103,7 +103,7 @@ function sdkWith(answer, { framed = true } = {}) {
       setImmediate(() => onMessage({ source: win.parent, data: { batiyao: 1, id: msg.id, ...out } }));
     },
   } : win;
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'miniapp-sdk', 'batiyao-miniapp.js'), 'utf8'), { window: win, setTimeout, clearTimeout, Promise });
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'miniapp-sdk', 'batiyao-miniapp.js'), 'utf8'), { window: win, setTimeout, clearTimeout, Promise, Blob });
   const emit = (event, data) => onMessage({ source: win.parent, data: { batiyao: 1, event, data } });
   return { Batiyao: win.Batiyao, sent, emit };
 }
@@ -111,7 +111,7 @@ const code = (p) => p.then(() => 'resolved', (e) => e.code);
 
 test('pickImage and pickVideo check their options before asking Batiyao', async () => {
   const { Batiyao, sent } = sdkWith(() => ({ result: { status: 'cancelled' } }));
-  assert.strictEqual(Batiyao.version, '1.5.0');
+  assert.strictEqual(Batiyao.version, '1.6.0');
   for (const bad of [10, 5000, 1.5, '512']) assert.strictEqual(await code(Batiyao.pickImage({ max_size: bad })), 'INVALID');
   for (const bad of [0, 601, 'x', Infinity]) assert.strictEqual(await code(Batiyao.pickVideo({ max_seconds: bad })), 'INVALID');
   assert.strictEqual(sent.length, 0);
@@ -549,4 +549,90 @@ test('the simulator starts from a link, invites, and lets declared addresses thr
   } finally {
     server.close();
   }
+});
+
+// --- 1.6.0: files on the device, and sharing a video or a sound ---
+
+test('files: names and Blobs are checked before asking Batiyao, and the answers pass through', async () => {
+  const { Batiyao, sent } = sdkWith((m, p) => {
+    if (m === 'getContext') return { result: { features: ['files', 'shareMedia'] } };
+    if (m === 'files.save') return { result: { saved: true, name: p.name, type: 'image/png', kind: 'image', size: p.file.size, saved_at: 'now' } };
+    if (m === 'files.get') return { result: p.name === 'none.png' ? { file: null } : { file: new Blob(['x']), name: p.name } };
+    if (m === 'files.list') return { result: { files: [{ name: 'a.png' }] } };
+    if (m === 'files.remove') return { result: { removed: true } };
+    return { result: { bytes: 1, limit: 209715200, count: 1, max_files: 500 } };
+  });
+  for (const bad of ['', '.hidden', '-x', 'a/b.png', '../x', 'a b', 'x'.repeat(129), 7]) {
+    assert.strictEqual(await code(Batiyao.files.save(bad, new Blob(['x']))), 'INVALID_NAME', String(bad));
+  }
+  assert.strictEqual(await code(Batiyao.files.save('a.png', 'not a blob')), 'INVALID');
+  assert.strictEqual(await code(Batiyao.files.save('a.png', new Blob([]))), 'INVALID');
+  assert.strictEqual(await code(Batiyao.files.get('../x')), 'INVALID_NAME');
+  assert.strictEqual(sent.length, 0);
+  const saved = await Batiyao.files.save('level-3.png', new Blob(['\x89PNG']));
+  assert.strictEqual(saved.saved, true);
+  assert.ok(sent[0].params.file instanceof Blob, 'the Blob itself goes to Batiyao');
+  assert.strictEqual((await Batiyao.files.get('none.png')).file, null);
+  assert.deepStrictEqual((await Batiyao.files.list()).map((f) => f.name), ['a.png']);
+  assert.strictEqual((await Batiyao.files.remove('a.png')).removed, true);
+  assert.strictEqual((await Batiyao.files.usage()).max_files, 500);
+  assert.strictEqual(await Batiyao.supports('files'), true);
+  assert.strictEqual(await Batiyao.supports('files.save'), true);
+  assert.strictEqual(await Batiyao.supports('share.video'), true);
+});
+
+test('share() takes one video or sound as a Blob, and never sends it to a Batiyao without shareMedia', async () => {
+  const { Batiyao, sent } = sdkWith((m) => (m === 'getContext' ? { result: { features: ['share', 'shareMedia'] } } : { result: {} }));
+  const v = new Blob(['video']), a = new Blob(['sound']);
+  assert.strictEqual(await code(Batiyao.share({ video: 'x' })), 'INVALID');
+  assert.strictEqual(await code(Batiyao.share({ video: v, audio: a })), 'INVALID');
+  assert.strictEqual(await code(Batiyao.share({ video: v, image: 'data:image/png;base64,AA==' })), 'INVALID');
+  assert.strictEqual(await code(Batiyao.share({ video: new Blob([new Uint8Array(20 * 1024 * 1024 + 1)]) })), 'VIDEO_TOO_LARGE');
+  assert.strictEqual(await code(Batiyao.share({ audio: new Blob([new Uint8Array(10 * 1024 * 1024 + 1)]) })), 'AUDIO_TOO_LARGE');
+  assert.strictEqual(sent.length, 0);
+  assert.deepStrictEqual(await Batiyao.share({ video: v, text: 'Look' }), {});
+  const shareMsg = sent.find((x) => x.method === 'share');
+  assert.ok(shareMsg.params.video instanceof Blob);
+  assert.deepStrictEqual(await Batiyao.share({ audio: a, image: 'data:image/png;base64,AA==' }), {});
+
+  const older = sdkWith((m) => (m === 'getContext' ? { result: { features: ['share'] } } : { result: {} }));
+  assert.strictEqual(await code(older.Batiyao.share({ video: v })), 'UNKNOWN_METHOD');
+  assert.ok(!older.sent.some((x) => x.method === 'share'), 'a video is never handed to a Batiyao that would drop it');
+  assert.deepStrictEqual(await older.Batiyao.share({ text: 'words still work' }), {});
+});
+
+test('the simulator keeps files by their bytes and shares videos and sounds', async () => {
+  const server = simulator.main([WINGBEAT, '--port', '31096']);
+  await new Promise((r) => server.once('listening', r));
+  try {
+    const html = await (await fetch('http://127.0.0.1:31096/')).text();
+    const js = html.split('<script>')[1].split('</script>')[0];
+    new (require('node:vm').Script)(js);
+    for (const s of ["'files.save'", "'files.get'", "'files.list'", "'files.remove'", "'files.usage'", "'files', 'shareMedia'", 'VIDEO_TOO_LONG', 'AUDIO_TOO_LARGE', 'id="sh-video"', 'id="sh-audio"']) {
+      assert.ok(html.includes(s), s);
+    }
+    // Run the page's own sniffing on real file heads.
+    const fnSrc = js.slice(js.indexOf('function sniffType'), js.indexOf('const SPACE ='));
+    const sniffType = new Function(fnSrc + '; return sniffType;')();
+    const head = (...parts) => { const out = []; for (const p of parts) out.push(...(typeof p === 'string' ? Array.from(p, (c) => c.charCodeAt(0)) : p)); while (out.length < 16) out.push(0); return new Uint8Array(out); };
+    assert.strictEqual(sniffType(head([0x89], 'PNG', [0x0d, 0x0a, 0x1a, 0x0a])).type, 'image/png');
+    assert.strictEqual(sniffType(head([0xff, 0xd8, 0xff])).type, 'image/jpeg');
+    assert.strictEqual(sniffType(head('RIFF', [0, 0, 0, 0], 'WAVE')).type, 'audio/wav');
+    assert.strictEqual(sniffType(head('ID3')).type, 'audio/mpeg');
+    assert.strictEqual(sniffType(head([0, 0, 0, 0x20], 'ftypM4A ')).type, 'audio/mp4');
+    assert.strictEqual(sniffType(head([0, 0, 0, 0x20], 'ftypisom')).type, 'video/mp4');
+    assert.strictEqual(sniffType(head([0x1a, 0x45, 0xdf, 0xa3])).type, 'video/webm');
+    assert.strictEqual(sniffType(head([0x1a, 0x45, 0xdf, 0xa3]), 'audio/webm').type, 'audio/webm');
+    assert.strictEqual(sniffType(head('<html>'), 'image/png'), null);
+    assert.strictEqual(sniffType(head('%PDF-1.7')), null);
+  } finally {
+    server.close();
+  }
+});
+
+test('files and shareMedia may be listed in "requires"', () => {
+  const files = readFolder(WINGBEAT);
+  const m = JSON.parse(files.find((f) => f.path === 'manifest.json').data);
+  const { problems } = checkBundle(withFile(files, 'manifest.json', JSON.stringify({ ...m, requires: ['files', 'shareMedia'] })));
+  assert.deepStrictEqual(problems.filter((p) => /requires/.test(p)), []);
 });

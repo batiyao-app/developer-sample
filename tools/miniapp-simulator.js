@@ -126,6 +126,9 @@ const HOST_PAGE = (manifest) => `<!doctype html>
   <div id="share-sheet" class="sheetlike"><div class="card">
     <p><b>Share from ${manifest.name.replace(/[<&]/g, '')}</b><br><small>The sheet Batiyao draws: the person picks Story or Post and may change the words</small></p>
     <img id="sh-img" alt="" style="max-width:100%;max-height:40vh;display:none;border:1px solid #e2e8f0;border-radius:8px">
+    <video id="sh-video" controls playsinline style="max-width:100%;max-height:40vh;display:none;border-radius:8px;background:#000"></video>
+    <audio id="sh-audio" controls style="width:100%;display:none"></audio>
+    <p id="sh-media-note" class="note" style="display:none"></p>
     <p id="sh-text" style="white-space:pre-wrap"></p>
     <p class="note">In the simulator nothing is posted. On Batiyao, your app is never told whether the person shared.</p>
     <div class="row"><button id="sh-cancel">Cancel</button><button id="sh-ok" class="pay">Share</button></div>
@@ -195,7 +198,7 @@ if (['needs_download', 'unavailable'].includes(QS.get('ai'))) document.getElemen
 const aiMode = () => document.getElementById('ai-mode').value;
 const DECLARED = MANIFEST.capabilities || {};
 const aiCaps = () => Object.fromEntries(Object.entries(DECLARED).map(([n, c]) => [n, { version: c.version, state: aiMode(), tools: c.tools || [] }]));
-const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname', 'network'].concat(mpMode() === 'off' ? [] : ['multiplayer', 'invite'])
+const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname', 'network', 'files', 'shareMedia'].concat(mpMode() === 'off' ? [] : ['multiplayer', 'invite'])
   .concat(aiMode() === 'unavailable' ? [] : Object.keys(DECLARED));
 let aiRunning = null;
 let nicking = null;
@@ -272,18 +275,61 @@ function handle(m) {
       if (navigator.userActivation && !navigator.userActivation.isActive) return bad('NEEDS_TAP', 'Call share() from a tap or click.');
       const img = typeof p.image === 'string' ? p.image : '';
       const text = typeof p.text === 'string' ? p.text : '';
+      // A video or a sound (1.6.0): a Blob; Batiyao re-encodes it.
+      const video = p.video instanceof Blob ? p.video : null;
+      const audio = p.audio instanceof Blob ? p.audio : null;
+      if ((p.video != null && !video) || (p.audio != null && !audio)) return bad('INVALID', 'share() takes a video or a sound as a Blob.');
+      if ((video && audio) || (video && img)) return bad('INVALID', 'share() takes one picture, video or sound (a sound may come with a picture).');
+      if (video && video.size > 20 * 1024 * 1024) return bad('VIDEO_TOO_LARGE', 'A video to share is at most 20 MB.');
+      if (audio && audio.size > 10 * 1024 * 1024) return bad('AUDIO_TOO_LARGE', 'A sound to share is at most 10 MB.');
       if (img && !/^data:image\\/(png|jpeg);base64,/.test(img)) return bad('INVALID_IMAGE', 'The image must be a PNG or JPEG data: URL.');
       if (text.length > 380) return bad('INVALID_TEXT', 'Suggested text is at most 380 characters.');
       if (/(^|[^\\p{L}\\p{N}_])@[\\p{L}\\p{N}_]/u.test(text)) return bad('INVALID_TEXT', 'Suggested text can\\'t tag people (@).');
       if (/(^|[^\\p{L}\\p{N}_&])#[\\p{L}\\p{N}_]/u.test(text)) return bad('INVALID_TEXT', 'Suggested text can\\'t contain hashtags (#).');
       if (/(https?:\\/\\/|www\\.)/i.test(text)) return bad('INVALID_TEXT', 'Suggested text can\\'t contain links.');
-      if (!img && !text) return bad('INVALID', 'share() needs an image, text, or both.');
+      if (!img && !text && !video && !audio) return bad('INVALID', 'share() needs a picture, a video, a sound, text, or a mix.');
       sharing = m.id;
-      const el = document.getElementById('sh-img');
-      el.style.display = img ? 'block' : 'none';
-      if (img) el.src = img;
-      document.getElementById('sh-text').textContent = text;
-      document.getElementById('share-sheet').style.display = 'flex';
+      const media = video || audio;
+      const showSheet = (seconds) => {
+        const el = document.getElementById('sh-img');
+        el.style.display = img ? 'block' : 'none';
+        if (img) el.src = img;
+        const v = document.getElementById('sh-video'), a = document.getElementById('sh-audio'), note = document.getElementById('sh-media-note');
+        v.style.display = video ? 'block' : 'none';
+        a.style.display = audio ? 'block' : 'none';
+        note.style.display = media ? 'block' : 'none';
+        if (video) v.src = URL.createObjectURL(video);
+        if (audio) a.src = URL.createObjectURL(audio);
+        if (media) {
+          const story = seconds <= 30.5 ? 'Story, Post or Chat' : 'Post or Chat (stories are at most 30 seconds)';
+          note.textContent = (video ? 'A video' : 'A sound') + ' of ' + Math.round(seconds) + ' s. On Batiyao it is re-encoded first ('
+            + (video ? 'MP4, at most 1280 px and 30 frames a second' : 'M4A; in a post or story it becomes a video of '
+            + (img ? 'the picture' : 'your app\\'s icon') + ' with the sound') + ') and can go to ' + story + '.';
+        }
+        document.getElementById('sh-text').textContent = text;
+        document.getElementById('share-sheet').style.display = 'flex';
+      };
+      if (!media) { showSheet(0); return; }
+      // How long it is: what the media element says (Batiyao measures the file).
+      const probe = document.createElement(video ? 'video' : 'audio');
+      const url = URL.createObjectURL(media);
+      probe.preload = 'metadata';
+      probe.onloadedmetadata = () => {
+        URL.revokeObjectURL(url);
+        const seconds = probe.duration;
+        const max = video ? 60 : 300;
+        if (!Number.isFinite(seconds) || seconds > max + 0.5) {
+          sharing = null;
+          return bad(video ? 'VIDEO_TOO_LONG' : 'AUDIO_TOO_LONG', 'A ' + (video ? 'video' : 'sound') + ' to share is at most ' + max + ' seconds.');
+        }
+        showSheet(seconds);
+      };
+      probe.onerror = () => {
+        URL.revokeObjectURL(url);
+        sharing = null;
+        bad(video ? 'VIDEO_INVALID' : 'AUDIO_INVALID', 'The ' + (video ? 'video' : 'sound') + ' can\\'t be read.');
+      };
+      probe.src = url;
       return;
     }
     case 'pickImage':
@@ -326,7 +372,7 @@ function handle(m) {
       return reply(m.id, {});
     case 'close': reply(m.id, {}); log('the app asked to close', 'ev'); return;
     default:
-      if (SOCIAL[m.method]) return SOCIAL[m.method](m, p).catch((e) => bad('FAILED', String(e && e.message || e)));
+      if (SOCIAL[m.method]) return SOCIAL[m.method](m, p).catch((e) => bad((e && e.code) || 'FAILED', String(e && e.message || e)));
       return bad('UNKNOWN_METHOD', 'Batiyao doesn\\'t know "' + m.method + '".');
   }
 }
@@ -344,6 +390,10 @@ document.getElementById('s-pay').onclick = () => endPay({ status: 'paid' });
 document.getElementById('s-cancel').onclick = () => endPay({ status: 'cancelled' });
 function endShare(how) {
   document.getElementById('share-sheet').style.display = 'none';
+  for (const id of ['sh-video', 'sh-audio']) {
+    const el = document.getElementById(id);
+    if (el.src) { URL.revokeObjectURL(el.src); el.removeAttribute('src'); }
+  }
   const id = sharing; sharing = null;
   log('the person chose: ' + how + ' (your app only hears that the sheet closed)', 'ev');
   reply(id, {});
@@ -539,7 +589,81 @@ async function enterMatch(m, p, op) {
   matchCode = r.result.match && r.result.match.code;
   reply(m.id, { status: 'joined', match: r.result.match });
 }
+// --- Batiyao.files (1.6.0): the app's own pictures, sounds and videos on
+// this device. Batiyao keeps them in its own storage, one space per person
+// and app; here, in the simulator's IndexedDB. The bytes decide the type.
+const FILE_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+const FILE_MAX = 50 * 1024 * 1024, SPACE_MAX = 200 * 1024 * 1024, SPACE_FILES = 500;
+function sniffType(h, hint) {
+  const at = (off, codes) => codes.every((c, i) => h[off + i] === c);
+  const str = (off, t) => at(off, Array.from(t, (ch) => ch.charCodeAt(0)));
+  if (at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return { type: 'image/png', kind: 'image' };
+  if (at(0, [0xff, 0xd8, 0xff])) return { type: 'image/jpeg', kind: 'image' };
+  if (str(0, 'GIF87a') || str(0, 'GIF89a')) return { type: 'image/gif', kind: 'image' };
+  if (str(0, 'RIFF') && str(8, 'WEBP')) return { type: 'image/webp', kind: 'image' };
+  if (str(0, 'RIFF') && str(8, 'WAVE')) return { type: 'audio/wav', kind: 'audio' };
+  if (str(0, 'ID3') || (h[0] === 0xff && (h[1] & 0xe0) === 0xe0)) return { type: 'audio/mpeg', kind: 'audio' };
+  if (str(0, 'OggS')) return { type: 'audio/ogg', kind: 'audio' };
+  if (str(4, 'ftyp')) return str(8, 'M4A ') || str(8, 'M4B ') ? { type: 'audio/mp4', kind: 'audio' } : { type: 'video/mp4', kind: 'video' };
+  if (at(0, [0x1a, 0x45, 0xdf, 0xa3])) return String(hint || '').toLowerCase().startsWith('audio/') ? { type: 'audio/webm', kind: 'audio' } : { type: 'video/webm', kind: 'video' };
+  return null;
+}
+const SPACE = PLAYER + ':' + MANIFEST.app_id + ':test';
+function filesDB() {
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open('sim-miniapp-files', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('files', { keyPath: 'k' }).createIndex('space', 'space');
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(Object.assign(new Error('This browser can’t keep files.'), { code: 'STORAGE_UNAVAILABLE' }));
+  });
+}
+async function filesTx(mode, fn) {
+  const db = await filesDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('files', mode);
+    const req = fn(tx.objectStore('files'));
+    let out;
+    if (req) req.onsuccess = () => { out = req.result; };
+    tx.oncomplete = () => { db.close(); resolve(out); };
+    tx.onerror = tx.onabort = () => { db.close(); reject(Object.assign(new Error('Batiyao couldn’t keep the file.'), { code: tx.error && tx.error.name === 'QuotaExceededError' ? 'STORAGE_FULL' : 'STORAGE_UNAVAILABLE' })); };
+  });
+}
+const fileRows = async () => (await filesTx('readonly', (st) => st.index('space').getAll(SPACE))) || [];
+const fileInfo = (r) => ({ name: r.name, type: r.type, kind: r.kind, size: r.size, saved_at: r.saved_at });
+const FILES = {
+  'files.save': async (m, p) => {
+    if (typeof p.name !== 'string' || !FILE_NAME_RE.test(p.name)) return reply(m.id, null, { code: 'INVALID_NAME', message: 'A file name is 1-128 letters, digits, "_", "." or "-", not starting with "." or "-".' });
+    if (!(p.file instanceof Blob) || p.file.size === 0) return reply(m.id, null, { code: 'INVALID', message: 'files.save() needs a non-empty Blob.' });
+    if (p.file.size > FILE_MAX) return reply(m.id, null, { code: 'FILE_TOO_LARGE', message: 'A file is at most 50 MB.' });
+    const t = sniffType(new Uint8Array(await p.file.slice(0, 16).arrayBuffer()), p.file.type);
+    if (!t) return reply(m.id, null, { code: 'UNSUPPORTED_TYPE', message: 'Only pictures (PNG, JPEG, GIF, WebP), sounds (WAV, MP3, M4A, Ogg, WebM) and videos (MP4, WebM) can be kept.' });
+    const all = await fileRows();
+    const old = all.find((r) => r.name === p.name);
+    const used = all.reduce((n, r) => n + r.size, 0) - (old ? old.size : 0);
+    if (!old && all.length >= SPACE_FILES) return reply(m.id, null, { code: 'STORAGE_FULL', message: 'At most 500 files per app.' });
+    if (used + p.file.size > SPACE_MAX) return reply(m.id, null, { code: 'STORAGE_FULL', message: 'This app’s 200 MB on this device is full.' });
+    const row = { k: SPACE + '/' + p.name, space: SPACE, name: p.name, type: t.type, kind: t.kind, size: p.file.size, saved_at: new Date().toISOString(), blob: p.file.slice(0, p.file.size, t.type) };
+    await filesTx('readwrite', (st) => st.put(row));
+    reply(m.id, Object.assign({ saved: true }, fileInfo(row)));
+  },
+  'files.get': async (m, p) => {
+    if (typeof p.name !== 'string' || !FILE_NAME_RE.test(p.name)) return reply(m.id, null, { code: 'INVALID_NAME', message: 'That isn’t a file name.' });
+    const r = await filesTx('readonly', (st) => st.get(SPACE + '/' + p.name));
+    reply(m.id, r ? Object.assign(fileInfo(r), { file: r.blob }) : { file: null });
+  },
+  'files.list': async (m) => reply(m.id, { files: (await fileRows()).map(fileInfo).sort((a, b) => a.name.localeCompare(b.name)) }),
+  'files.remove': async (m, p) => {
+    if (typeof p.name !== 'string' || !FILE_NAME_RE.test(p.name)) return reply(m.id, null, { code: 'INVALID_NAME', message: 'That isn’t a file name.' });
+    await filesTx('readwrite', (st) => st.delete(SPACE + '/' + p.name));
+    reply(m.id, { removed: true });
+  },
+  'files.usage': async (m) => {
+    const all = await fileRows();
+    reply(m.id, { bytes: all.reduce((n, r) => n + r.size, 0), limit: SPACE_MAX, count: all.length, max_files: SPACE_FILES });
+  },
+};
 const SOCIAL = {
+  ...FILES,
   'getNickname': async (m, p) => {
     const ask = !!p.ask, tap = tapped();
     const cur = await api('nickname.get');

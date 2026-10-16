@@ -34,12 +34,19 @@
  *   from an opaque origin (Origin: null) with no cookies, so your server
  *   answers with CORS (Access-Control-Allow-Origin: *) and authenticates with
  *   what your app sends.
+ * 1.6.0 (2026-10-16): files and media sharing. Batiyao.files keeps your
+ *   app's own pictures, sounds and videos on this device (save, get, list,
+ *   remove, usage): one space per person and app, 200 MB, never uploaded.
+ *   share() also takes a video ({ video: Blob }, up to 20 MB and 60 s) or a
+ *   sound ({ audio: Blob }, up to 10 MB and 5 minutes, optionally with an
+ *   image to show it with). Batiyao re-encodes either before the person
+ *   sees it. Check supports('files') and supports('shareMedia').
  */
 (function (global) {
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.5.0';
+  var VERSION = '1.6.0';
   var pending = Object.create(null);
   var listeners = Object.create(null);
   var counter = 0;
@@ -114,7 +121,7 @@
     'getPurchases', 'consume', 'close', 'on', 'off', 'supports'];
   var LEGACY_FEATURES = ['pay', 'share'];
   // Method names that belong to one listed feature.
-  var FEATURE_OF = { getNickname: 'nickname', 'multiplayer.invite': 'invite', 'ai.image.generate': 'ai.image', 'ai.audio.generate': 'ai.audio', 'ai.ask': 'ai.assistant' };
+  var FEATURE_OF = { 'share.video': 'shareMedia', 'share.audio': 'shareMedia', getNickname: 'nickname', 'multiplayer.invite': 'invite', 'ai.image.generate': 'ai.image', 'ai.audio.generate': 'ai.audio', 'ai.ask': 'ai.assistant' };
   var AI_CAPABILITIES = ['ai.image', 'ai.audio', 'ai.assistant'];
   var IMAGE_QUALITY = ['fast', 'balanced', 'best'];
   var AUDIO_SECONDS = { music: [8, 15, 30], sound: [3, 6, 12] };
@@ -172,6 +179,36 @@
     return v !== null && typeof v === 'object' && !Array.isArray(v);
   }
 
+  // Batiyao.files: plain names, and at most 50 MB a file (the host checks
+  // the rest: the type from the bytes, 200 MB and 500 files per app).
+  var FILE_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+  var FILE_MAX_BYTES = 50 * 1024 * 1024;
+  var SHARE_VIDEO_MAX_BYTES = 20 * 1024 * 1024;
+  var SHARE_AUDIO_MAX_BYTES = 10 * 1024 * 1024;
+
+  function isBlob(v) {
+    return typeof Blob !== 'undefined' && v instanceof Blob;
+  }
+
+  // A call that needs a feature an older Batiyao doesn't have: answered
+  // UNKNOWN_METHOD here rather than sent to a host that would mishandle it.
+  function withFeature(feature, method, run) {
+    return context().then(function (ctx) {
+      var f = ctx && ctx.features;
+      if (!Array.isArray(f) || f.indexOf(feature) < 0) {
+        throw makeError('UNKNOWN_METHOD', 'This version of Batiyao doesn\'t have ' + method + '(). Check supports(\'' + feature + '\') first.');
+      }
+      return run();
+    });
+  }
+
+  function checkFileName(name) {
+    if (typeof name !== 'string' || !FILE_NAME_RE.test(name)) {
+      return makeError('INVALID_NAME', 'A file name is 1-128 letters, digits, "_", "." or "-", not starting with "." or "-".');
+    }
+    return null;
+  }
+
   var CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/;
   var MP_EVENTS = ['joined', 'left', 'message', 'host', 'closed'];
 
@@ -218,11 +255,15 @@
     },
 
     /**
-     * Offer the person something to share as a post or story: a picture your
-     * app made (a <canvas> or a PNG/JPEG data: URL, up to 6 MB, 64-4096 px a
-     * side) and suggested words (up to 380 characters; no @tags, #hashtags
-     * or links). Batiyao shows its own sheet; the person picks Story or Post,
-     * may change the words, and decides. Call it from a tap.
+     * Offer the person something to share as a post, story or chat message:
+     * a picture your app made (a <canvas> or a PNG/JPEG data: URL, up to
+     * 6 MB, 64-4096 px a side), a video ({ video: Blob }, up to 20 MB and 60
+     * seconds) or a sound ({ audio: Blob }, up to 10 MB and 5 minutes; with
+     * image, the picture it is shown with in a post or story), and suggested
+     * words (up to 380 characters; no @tags, #hashtags or links). Batiyao
+     * re-encodes a video or sound first, shows its own sheet, and the person
+     * decides. Call it from a tap. Videos and sounds need
+     * supports('shareMedia'); an older Batiyao rejects UNKNOWN_METHOD.
      * Resolves {} when the sheet closes. On purpose, your app is never told
      * whether the person shared: never reward sharing or require it.
      */
@@ -241,10 +282,27 @@
       if (typeof text !== 'string' || text.length > 380) {
         return Promise.reject(makeError('INVALID', 'share() text is a string of at most 380 characters.'));
       }
-      if (!image && !text) {
-        return Promise.reject(makeError('INVALID', 'share() needs an image, text, or both.'));
+      var video = options.video, audio = options.audio;
+      if ((video != null && !isBlob(video)) || (audio != null && !isBlob(audio))) {
+        return Promise.reject(makeError('INVALID', 'share() takes a video or a sound as a Blob.'));
       }
-      return send('share', { image: image || '', text: text });
+      if ((video && audio) || (video && image)) {
+        return Promise.reject(makeError('INVALID', 'share() takes one picture, video or sound (a sound may come with a picture).'));
+      }
+      if (video && video.size > SHARE_VIDEO_MAX_BYTES) {
+        return Promise.reject(makeError('VIDEO_TOO_LARGE', 'A video to share is at most 20 MB.'));
+      }
+      if (audio && audio.size > SHARE_AUDIO_MAX_BYTES) {
+        return Promise.reject(makeError('AUDIO_TOO_LARGE', 'A sound to share is at most 10 MB.'));
+      }
+      if (!image && !text && !video && !audio) {
+        return Promise.reject(makeError('INVALID', 'share() needs a picture, a video, a sound, text, or a mix.'));
+      }
+      var params = { image: image || '', text: text };
+      if (!video && !audio) return send('share', params);
+      if (video) params.video = video;
+      if (audio) params.audio = audio;
+      return withFeature('shareMedia', 'share', function () { return send('share', params); });
     },
 
     /**
@@ -305,7 +363,7 @@
       if (CORE.indexOf(name) >= 0) return Promise.resolve(isFramed);
       if (typeof name === 'string') {
         if (FEATURE_OF[name]) name = FEATURE_OF[name];
-        else if (/^(db|multiplayer)\./.test(name)) name = name.split('.')[0];
+        else if (/^(db|multiplayer|files)\./.test(name)) name = name.split('.')[0];
       }
       return context().then(function (ctx) {
         var f = ctx && ctx.features;
@@ -552,6 +610,46 @@
       /** How full the store is: { bytes, limit }. */
       usage: function () {
         return send('db.usage', {}, 20000);
+      }
+    },
+
+    /**
+     * Your app's own pictures, sounds and videos, kept on this device by
+     * Batiyao (your app has no storage of its own): one space per person and
+     * app (test runs apart), 200 MB and 500 files, 50 MB a file, never
+     * uploaded and not on the person's other devices. Only PNG, JPEG, GIF,
+     * WebP, WAV, MP3, M4A, Ogg, WebM and MP4 are kept; the type comes from the
+     * bytes. Check supports('files'): an older Batiyao rejects UNKNOWN_METHOD.
+     * The person can clear them from your app's page. Share one with share().
+     */
+    files: {
+      /** Keep a Blob under a name (the same name replaces). Resolves { saved: true, name, type, kind, size, saved_at }. */
+      save: function (name, file) {
+        var e = checkFileName(name);
+        if (e) return Promise.reject(e);
+        if (!isBlob(file) || file.size === 0) return Promise.reject(makeError('INVALID', 'files.save() needs a non-empty Blob.'));
+        if (file.size > FILE_MAX_BYTES) return Promise.reject(makeError('FILE_TOO_LARGE', 'A file is at most 50 MB.'));
+        return send('files.save', { name: name, file: file }, 120000);
+      },
+      /** Resolves { file: Blob, name, type, kind, size, saved_at }, or { file: null } when there's no such file. */
+      get: function (name) {
+        var e = checkFileName(name);
+        if (e) return Promise.reject(e);
+        return send('files.get', { name: name }, 60000);
+      },
+      /** Resolves an array of { name, type, kind, size, saved_at }, by name. */
+      list: function () {
+        return send('files.list', {}, 20000).then(function (r) { return r ? r.files : []; });
+      },
+      /** Resolves { removed: true } (also when there was no such file). */
+      remove: function (name) {
+        var e = checkFileName(name);
+        if (e) return Promise.reject(e);
+        return send('files.remove', { name: name }, 20000);
+      },
+      /** Resolves { bytes, limit, count, max_files }. */
+      usage: function () {
+        return send('files.usage', {}, 20000);
       }
     },
 

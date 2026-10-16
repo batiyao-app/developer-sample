@@ -217,6 +217,21 @@ The rules that shape the code:
 - **Batiyao draws the share sheet too.** `Batiyao.share({ image: canvas, text })`
   from a tap; the person picks story, post or chat and decides. Your app only
   hears that the sheet closed — never reward or require sharing.
+  Since SDK 1.6.0 it also takes a video (`{ video: blob }`, up to 20 MB and
+  60 s) or a sound (`{ audio: blob }`, up to 10 MB and 5 minutes, optionally
+  with `image`, the picture it is shown with in a post or story — else your
+  icon). Batiyao re-encodes it first (MP4 / M4A, metadata gone); a video goes
+  to a story (30 s at most), a post or a chat, a sound to a chat, or to a post
+  or story as a video of the picture with the sound. Check
+  `supports('shareMedia')`. Details: <https://developer.batiyao.com/miniapps.md>
+  section 8.
+- **Keep what your app makes on the device with `Batiyao.files`** (SDK
+  1.6.0): `files.save(name, blob)`, `files.get(name)`, `files.list()`,
+  `files.remove(name)`, `files.usage()`. Pictures, sounds and videos only
+  (the type comes from the bytes), 50 MB a file, 200 MB and 500 files per
+  person per app, never uploaded and only on that device. Pictures and
+  sounds from `Batiyao.ai` fit straight in. Check `supports('files')`.
+  Details: <https://developer.batiyao.com/miniapps.md> section 10.4.
 - **Photos and videos come from Batiyao's picker.** A file input in your
   app opens nothing. Call `Batiyao.pickImage({ max_size })` or
   `Batiyao.pickVideo({ max_seconds })` from a tap: Batiyao shows its own
