@@ -210,7 +210,11 @@ The rules that shape the code:
   4. In the browser console, a *CSP* error means the host isn't declared
      exactly; a *CORS* error means your server's headers. Everything not
      declared stays blocked, as on Batiyao.
-  5. `npm run pack:miniapp` checks the addresses the way Batiyao's upload
+  5. **Admin review (simulated)**, at the top of the simulator's side panel,
+     lists each declared address and AI capability with **Approve** /
+     **Decline**. Everything starts approved; Decline one to see how your app
+     behaves when an admin says no (an address change reloads the app).
+  6. `npm run pack:miniapp` checks the addresses the way Batiyao's upload
      does; after upload, a **Test** run on Batiyao reaches them before an
      admin decides.
   The simulator re-reads `manifest.json` on every load, so an address you add

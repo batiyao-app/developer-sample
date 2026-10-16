@@ -35,6 +35,8 @@
 // Network (SDK 1.5.0): the addresses your manifest declares in "network"
 // are let through as if a Batiyao admin had approved them all (connect-src,
 // img-src and media-src, https and wss); every other host stays blocked.
+// "Admin review (simulated)" on the page lists each declared address and AI
+// capability with Approve / Decline; all start approved.
 //
 // Links and invites (SDK 1.5.0): open http://localhost:3100/?join=ABC234 to
 // start the app as if from an invite link (getContext().link is
@@ -119,6 +121,9 @@ const HOST_PAGE = (manifest) => `<!doctype html>
   #sheet button{padding:10px;border-radius:8px;border:1px solid #cbd5e1;font:inherit;cursor:pointer}
   #sheet .pay{background:#2563eb;color:#fff;border-color:#2563eb} #sheet .row{display:grid;grid-template-columns:1fr 1.4fr;gap:8px}
   #tools{padding:8px 12px;border-bottom:1px solid #1e293b} #tools button{font:inherit;margin-right:6px}
+  #admin{padding:8px 12px;border-bottom:1px solid #1e293b;background:#111c33} #admin small{color:#94a3b8}
+  #admin .item{display:flex;gap:10px;align-items:center;margin-top:4px} #admin .item code{flex:1;color:#e2e8f0}
+  #admin .declined code{color:#fca5a5;text-decoration:line-through}
 </style></head><body>
 <div id="stage">
   <div id="bar"><b>${manifest.name.replace(/[<&]/g, '')}</b><small>SIMULATOR</small><button id="reload">Reload</button></div>
@@ -165,7 +170,7 @@ const HOST_PAGE = (manifest) => `<!doctype html>
     <div class="row"><button id="s-cancel">Cancel</button><button id="s-pay" class="pay">Pay</button></div>
   </div></div>
 </div>
-<div><div id="tools"><button id="clear-storage">Clear saved data</button><button id="clear-purchases">Clear purchases</button><button id="visibility">Send visibility: hidden, then visible</button><label><input type="checkbox" id="pick-unavailable"> Photos and videos: unavailable (a child without the guardian's switch)</label><br>
+<div><div id="admin"><b>Admin review (simulated)</b> <small>On Batiyao an admin approves or declines each of these; here everything you declare starts approved. Decline one to see how your app copes.</small><div id="admin-items"></div></div><div id="tools"><button id="clear-storage">Clear saved data</button><button id="clear-purchases">Clear purchases</button><button id="visibility">Send visibility: hidden, then visible</button><label><input type="checkbox" id="pick-unavailable"> Photos and videos: unavailable (a child without the guardian's switch)</label><br>
 <button id="nickname">Nickname in this app</button><button id="follow-link">Follow a link…</button><button id="clear-shared">Clear the shared store</button>
 <label>Batiyao's AI: <select id="ai-mode"><option value="ready">ready</option><option value="needs_download">needs a download</option><option value="unavailable">unavailable</option></select></label>
 <label>Multiplayer: <select id="mp-mode"><option value="on">on</option><option value="off">off for this app</option><option value="ask_guardian">a child without the guardian's switch</option></select></label>
@@ -197,9 +202,12 @@ const mpMode = () => document.getElementById('mp-mode').value;
 if (['needs_download', 'unavailable'].includes(QS.get('ai'))) document.getElementById('ai-mode').value = QS.get('ai');
 const aiMode = () => document.getElementById('ai-mode').value;
 const DECLARED = MANIFEST.capabilities || {};
-const aiCaps = () => Object.fromEntries(Object.entries(DECLARED).map(([n, c]) => [n, { version: c.version, state: aiMode(), tools: c.tools || [] }]));
+// Capabilities the simulated admin declined: unavailable, as on Batiyao.
+const CAPS_DECLINED = new Set();
+const capState = (n) => (CAPS_DECLINED.has(n) ? 'unavailable' : aiMode());
+const aiCaps = () => Object.fromEntries(Object.entries(DECLARED).map(([n, c]) => [n, { version: c.version, state: capState(n), tools: c.tools || [] }]));
 const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname', 'network', 'files', 'shareMedia'].concat(mpMode() === 'off' ? [] : ['multiplayer', 'invite'])
-  .concat(aiMode() === 'unavailable' ? [] : Object.keys(DECLARED));
+  .concat(aiMode() === 'unavailable' ? [] : Object.keys(DECLARED).filter((n) => !CAPS_DECLINED.has(n)));
 let aiRunning = null;
 let nicking = null;
 const KEYRE = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -356,7 +364,7 @@ function handle(m) {
       if (!DECLARED[cap]) return bad('NOT_DECLARED', 'Add "' + cap + '" to "capabilities" in manifest.json to use it.');
       if (m.method !== 'ai.ask' && navigator.userActivation && !navigator.userActivation.isActive) return bad('NEEDS_TAP', 'Call it from a tap or click.');
       if (aiRunning || busy()) return bad('BUSY', 'One AI request at a time.');
-      if (aiMode() === 'unavailable') return reply(m.id, { status: 'unavailable' });
+      if (capState(cap) === 'unavailable') return reply(m.id, { status: 'unavailable' });
       if (p.web_search && !(DECLARED[cap].tools || []).includes('web_search')) return bad('NOT_DECLARED', 'Add "tools": ["web_search"] to ai.assistant in manifest.json.');
       if (aiMode() === 'needs_download') log('(Batiyao would ask the person to download the model first)', 'ev');
       aiRunning = { id: m.id, timers: [] };
@@ -496,6 +504,39 @@ document.getElementById('sh-cancel').onclick = () => endShare('cancel');
 // --- nicknames, the shared store, multiplayer (state is in the simulator's Node process) ---
 const busy = () => !!(paying || sharing || picking || nicking || inviting);
 const tapped = () => !navigator.userActivation || navigator.userActivation.isActive;
+// The simulated admin review: one Approve / Decline per declared address
+// and AI capability. An address change reloads the app (it is the page's
+// CSP); a capability change applies to the next call.
+function renderAdmin(state) {
+  const box = document.getElementById('admin-items');
+  box.textContent = '';
+  const items = state.network.map((x) => ({ kind: 'network', label: 'Network ' + x.name, ...x }))
+    .concat(state.caps.map((x) => ({ kind: 'caps', label: 'AI ' + x.name, ...x })));
+  if (!items.length) { box.textContent = 'Nothing declared that needs an admin (network, capabilities).'; return; }
+  CAPS_DECLINED.clear();
+  for (const it of items) {
+    if (it.kind === 'caps' && !it.approved) CAPS_DECLINED.add(it.name);
+    const row = document.createElement('div');
+    row.className = 'item' + (it.approved ? '' : ' declined');
+    const code = document.createElement('code');
+    code.textContent = it.label;
+    row.appendChild(code);
+    for (const [label, value] of [['Approve', true], ['Decline', false]]) {
+      const l = document.createElement('label');
+      const r = document.createElement('input');
+      r.type = 'radio'; r.name = it.kind + ':' + it.name; r.checked = it.approved === value;
+      r.onchange = async () => {
+        const res = await api('admin.set', { kind: it.kind, name: it.name, approved: value });
+        log('admin (simulated): ' + (value ? 'approved ' : 'declined ') + it.label + (it.kind === 'network' ? ' — reloading the app' : ''), 'ev');
+        renderAdmin(res.result);
+        if (it.kind === 'network') frame.src = frame.src;
+      };
+      l.append(r, ' ' + label);
+      row.appendChild(l);
+    }
+    box.appendChild(row);
+  }
+}
 async function api(op, params) {
   const res = await fetch('/sim/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ op, player: PLAYER, minor: MINOR }, params || {})) });
   return res.json();
@@ -720,7 +761,10 @@ document.getElementById('follow-link').onclick = () => {
   frame.contentWindow.postMessage({ batiyao: 1, event: 'link', data: { join: code } }, '*');
   log('event link ' + JSON.stringify({ join: code }), 'ev');
 };
-document.getElementById('reload').onclick = () => { frame.src = frame.src; };
+const loadAdmin = () => api('admin.get').then((r) => r.result && renderAdmin(r.result)).catch(() => {});
+loadAdmin();
+// Reload also picks up a manifest you edited (new addresses or capabilities).
+document.getElementById('reload').onclick = () => { loadAdmin(); frame.src = frame.src; };
 document.getElementById('clear-storage').onclick = () => { save(':storage', {}); log('saved data cleared', 'ev'); };
 document.getElementById('clear-purchases').onclick = () => { save(':purchases', []); log('purchases cleared', 'ev'); };
 document.getElementById('visibility').onclick = () => {
@@ -745,7 +789,10 @@ const MP = { minPlayers: 2, maxPlayers: 8, metaBytes: 256, dataBytes: 1024, perS
   matchesPerApp: 500, idleMs: 10 * 60 * 1000, lifetimeMs: 4 * 60 * 60 * 1000 };
 
 function createSimState() {
-  const sim = { nicknames: new Map(), offers: new Map(), records: new Map(), matches: new Map(), conns: new Map(), testMode: true };
+  const sim = { nicknames: new Map(), offers: new Map(), records: new Map(), matches: new Map(), conns: new Map(), testMode: true,
+    // The simulated admin's decisions: everything declared is approved
+    // until you decline it on the page.
+    declined: { network: new Set(), caps: new Set() }, declared: () => ({ network: [], caps: [] }) };
   sim.sweeper = setInterval(() => sweepMatches(sim), 30 * 1000);
   sim.sweeper.unref();
   return sim;
@@ -770,6 +817,20 @@ function simOp(sim, q) {
   const player = typeof q.player === 'string' && q.player ? q.player : 'sim-anonymous';
   const ok = (result) => ({ result });
   switch (q.op) {
+    // --- the simulated admin review
+    case 'admin.get':
+    case 'admin.set': {
+      if (q.op === 'admin.set') {
+        const set = q.kind === 'network' ? sim.declined.network : q.kind === 'caps' ? sim.declined.caps : null;
+        if (!set || typeof q.name !== 'string') return fail('INVALID', 'kind is network or caps, with a name');
+        if (q.approved) set.delete(q.name); else set.add(q.name);
+      }
+      const d = sim.declared();
+      return ok({
+        network: d.network.map((name) => ({ name, approved: !sim.declined.network.has(name) })),
+        caps: d.caps.map((name) => ({ name, approved: !sim.declined.caps.has(name) })),
+      });
+    }
     // --- nicknames
     case 'nickname.get': {
       const n = sim.nicknames.get(player);
@@ -1040,6 +1101,13 @@ function main(argv) {
 
   const base = `http://localhost:${port}/app/`;
   const sim = createSimState();
+  sim.declared = () => {
+    let m = manifest;
+    try { m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch (e) { /* the last good one */ }
+    return { network: origins(m), caps: Object.keys((m && m.capabilities) || {}) };
+  };
+  // What the simulated admin approved, of what is declared now.
+  const approvedNet = () => currentNet().filter((o) => !sim.declined.network.has(o));
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, base);
     if (url.pathname === '/sim/api' && req.method === 'POST') return simAPI(sim, req, res);
@@ -1063,7 +1131,7 @@ function main(argv) {
         const m = page.match(/^﻿?\s*<!doctype[^>]*>/i);
         data = Buffer.from(m ? m[0] + GUARD + page.slice(m[0].length) : GUARD + page);
       }
-      res.writeHead(200, { 'Content-Type': TYPES[ext] || 'application/octet-stream', ...fileHeaders(base, currentNet()) });
+      res.writeHead(200, { 'Content-Type': TYPES[ext] || 'application/octet-stream', ...fileHeaders(base, approvedNet()) });
       return res.end(data);
     }
     res.writeHead(404);

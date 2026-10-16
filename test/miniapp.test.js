@@ -546,6 +546,19 @@ test('the simulator starts from a link, invites, and lets declared addresses thr
     const again = await fetch('http://127.0.0.1:31097/app/index.html');
     assert.ok(again.headers.get('content-security-policy').includes('https://api.example.com wss://api.example.com https://cdn.example.com https://*.cdn.example.com'));
     assert.match(again.headers.get('connection-allowlist'), /"https:\/\/\*\.cdn\.example\.com\/\*"/);
+    // The simulated admin can decline an address; it is blocked on the next load.
+    const op = (body) => fetch('http://127.0.0.1:31097/sim/api', { method: 'POST', body: JSON.stringify(body) }).then((r) => r.json());
+    const listed = await op({ op: 'admin.get' });
+    assert.deepStrictEqual(listed.result.network.map((x) => x.approved), [true, true]);
+    await op({ op: 'admin.set', kind: 'network', name: 'https://api.example.com', approved: false });
+    const declined = await fetch('http://127.0.0.1:31097/app/index.html');
+    assert.ok(!declined.headers.get('content-security-policy').includes('https://api.example.com'));
+    assert.ok(declined.headers.get('content-security-policy').includes('https://*.cdn.example.com'));
+    await op({ op: 'admin.set', kind: 'network', name: 'https://api.example.com', approved: true });
+    const back = await fetch('http://127.0.0.1:31097/app/index.html');
+    assert.ok(back.headers.get('content-security-policy').includes('https://api.example.com'));
+    const html = await (await fetch('http://127.0.0.1:31097/')).text();
+    assert.match(html, /Admin review \(simulated\)/);
   } finally {
     server.close();
   }
