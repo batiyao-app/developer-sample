@@ -195,7 +195,13 @@ The rules that shape the code:
   Each `url` is a bare `https://` base address (no path). `https://*.example.com`
   is example.com **and all its subdomains**; it is its own entry, approved
   explicitly (approving example.com never covers a subdomain), and it must be
-  over a domain you own — `*.com`, `*.co.uk`, `*.github.io` are refused. A Batiyao admin
+  over a domain you own — `*.com`, `*.co.uk`, `*.github.io` are refused.
+  The simulator re-reads `manifest.json` on every load, so an address you add
+  is let through on **Reload**. Blocked anyway? The console says why: a CSP
+  error means the host isn't declared (exactly — subdomains need their own
+  entry or a wildcard); a CORS error means the server didn't allow
+  `Origin: null`; streams inside a playlist (M3U/PLS/HLS) must be on declared
+  `https://` addresses too. A Batiyao admin
   approves each one; until then, and for every other host, requests are
   blocked. Your app may `fetch`, use WebSockets (`wss://` on the same host)
   and show images, sound and video from an approved address — never load

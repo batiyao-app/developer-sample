@@ -537,6 +537,15 @@ test('the simulator starts from a link, invites, and lets declared addresses thr
     const page = await fetch('http://127.0.0.1:31097/app/index.html');
     assert.ok(page.headers.get('content-security-policy').includes('connect-src http://localhost:31097/app/ data: blob: https://api.example.com wss://api.example.com'));
     assert.strictEqual(page.headers.get('connection-allowlist'), '(response-origin "https://api.example.com/*" "wss://api.example.com/*")');
+    // An address added while the simulator runs counts on the next load
+    // (it used to stay blocked until a restart).
+    const mf = path.join(dir, 'manifest.json');
+    const m = JSON.parse(require('node:fs').readFileSync(mf, 'utf8'));
+    m.network.push({ url: 'https://*.cdn.example.com', purpose: 'Loads the pictures for each level.' });
+    require('node:fs').writeFileSync(mf, JSON.stringify(m));
+    const again = await fetch('http://127.0.0.1:31097/app/index.html');
+    assert.ok(again.headers.get('content-security-policy').includes('https://api.example.com wss://api.example.com https://cdn.example.com https://*.cdn.example.com'));
+    assert.match(again.headers.get('connection-allowlist'), /"https:\/\/\*\.cdn\.example\.com\/\*"/);
   } finally {
     server.close();
   }

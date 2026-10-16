@@ -888,8 +888,23 @@ function main(argv) {
   }
   for (const p of problems) console.warn(`upload would refuse: ${p}`);
   for (const f of flags) console.warn(`note: ${f} — an admin will look at this before it goes live.`);
-  const net = origins(manifest);
-  for (const o of net) console.log(`network: ${o} is let through (on Batiyao, only once an admin approves it)`);
+  // The declared addresses are read from manifest.json on every request, so
+  // adding or changing "network" shows on Reload, like any other edit (they
+  // used to be read once at start, and an address added later stayed blocked).
+  let shownNet = '';
+  const currentNet = () => {
+    let m = manifest;
+    try { m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch (e) { /* keep the last good one */ }
+    const net = origins(m);
+    const key = net.join(' ');
+    if (key !== shownNet) {
+      shownNet = key;
+      if (!net.length) console.log('network: none declared — every address is blocked');
+      for (const o of net) console.log(`network: ${o} is let through (on Batiyao, only once an admin approves it)`);
+    }
+    return net;
+  };
+  currentNet();
 
   const base = `http://localhost:${port}/app/`;
   const sim = createSimState();
@@ -916,7 +931,7 @@ function main(argv) {
         const m = page.match(/^﻿?\s*<!doctype[^>]*>/i);
         data = Buffer.from(m ? m[0] + GUARD + page.slice(m[0].length) : GUARD + page);
       }
-      res.writeHead(200, { 'Content-Type': TYPES[ext] || 'application/octet-stream', ...fileHeaders(base, net) });
+      res.writeHead(200, { 'Content-Type': TYPES[ext] || 'application/octet-stream', ...fileHeaders(base, currentNet()) });
       return res.end(data);
     }
     res.writeHead(404);
