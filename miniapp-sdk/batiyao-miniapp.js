@@ -34,6 +34,15 @@
  *   from an opaque origin (Origin: null) with no cookies, so your server
  *   answers with CORS (Access-Control-Allow-Origin: *) and authenticates with
  *   what your app sends.
+ * 1.8.0 (2026-10-16): net.fetch — read your approved addresses even when
+ *   they send no CORS headers (a media source, a feed). The Batiyao phone app
+ *   makes the request on the phone itself, only to your approved addresses,
+ *   with no cookies and nothing of the person's. Phone apps only: on
+ *   batiyao.com supports('net') is false and calls reject UNKNOWN_METHOD (a
+ *   browser can't get around CORS). An admin switches it on per app: declare
+ *   "net.fetch" in manifest.json "capabilities" with your purpose and have
+ *   permission from each source. Answers { status, status_text, url,
+ *   headers } and text / json / blob / file; net.cancel(requestId) stops one.
  * 1.7.0 (2026-10-16): share({ invite: true }) — while the person is in a
  *   match, the post or chat message links into it (…/apps/<slug>?join=CODE),
  *   so whoever taps it joins. Batiyao finds the code; stories can't invite.
@@ -49,7 +58,7 @@
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.7.0';
+  var VERSION = '1.8.0';
   var pending = Object.create(null);
   var listeners = Object.create(null);
   var counter = 0;
@@ -63,6 +72,8 @@
 
   // Progress callbacks of running ai requests, by request id.
   var progress = Object.create(null);
+  // net.fetch progress callbacks, by the request_id the SDK gave it.
+  var netProgress = Object.create(null);
 
   function send(method, params, timeoutMs, onProgress) {
     return new Promise(function (resolve, reject) {
@@ -103,6 +114,13 @@
       }
       return;
     }
+    if (data.event === 'net.progress' && data.data && typeof data.data.request_id === 'string') {
+      var nf = netProgress[data.data.request_id];
+      if (nf) {
+        try { nf({ received: data.data.received, total: data.data.total == null ? null : data.data.total }); } catch (e) { /* the app's own error */ }
+      }
+      return;
+    }
     if (typeof data.event === 'string') {
       var fns = listeners[data.event] || [];
       for (var i = 0; i < fns.length; i++) {
@@ -124,7 +142,7 @@
     'getPurchases', 'consume', 'close', 'on', 'off', 'supports'];
   var LEGACY_FEATURES = ['pay', 'share'];
   // Method names that belong to one listed feature.
-  var FEATURE_OF = { 'share.video': 'shareMedia', 'share.audio': 'shareMedia', getNickname: 'nickname', 'multiplayer.invite': 'invite', 'ai.image.generate': 'ai.image', 'ai.audio.generate': 'ai.audio', 'ai.ask': 'ai.assistant' };
+  var FEATURE_OF = { 'net.fetch': 'net', 'net.cancel': 'net', 'share.video': 'shareMedia', 'share.audio': 'shareMedia', getNickname: 'nickname', 'multiplayer.invite': 'invite', 'ai.image.generate': 'ai.image', 'ai.audio.generate': 'ai.audio', 'ai.ask': 'ai.assistant' };
   var AI_CAPABILITIES = ['ai.image', 'ai.audio', 'ai.assistant'];
   var IMAGE_QUALITY = ['fast', 'balanced', 'best'];
   var AUDIO_SECONDS = { music: [8, 15, 30], sound: [3, 6, 12] };
@@ -210,6 +228,64 @@
       return makeError('INVALID_NAME', 'A file name is 1-128 letters, digits, "_", "." or "-", not starting with "." or "-".');
     }
     return null;
+  }
+
+  // net.fetch (1.8.0): what Batiyao accepts, checked here first.
+  var NET_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
+  var NET_RESPONSES = ['text', 'json', 'blob', 'file'];
+  var NET_FORBIDDEN = ['host', 'cookie', 'origin', 'referer', 'user-agent', 'connection', 'content-length',
+    'transfer-encoding', 'accept-encoding', 'expect', 'via', 'forwarded', 'date', 'dnt', 'te', 'trailer', 'upgrade', 'keep-alive'];
+  var NET_BODY_MAX = 20 * 1024 * 1024;
+  var NET_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+  var netCounter = 0;
+
+  function netHeaderForbidden(name) {
+    var n = String(name).trim().toLowerCase();
+    return NET_FORBIDDEN.indexOf(n) >= 0 || /^(proxy-|sec-|x-forwarded-)/.test(n);
+  }
+
+  // checkNetFetch returns the params to send, or throws the error.
+  function checkNetFetch(url, o) {
+    if (typeof url !== 'string' || url.length > 2048 || !/^https:\/\/[^\s/?#]+/i.test(url)) {
+      throw makeError('INVALID', 'net.fetch() takes an https:// address on one of your approved addresses.');
+    }
+    var params = { url: url };
+    var method = o.method == null ? 'GET' : String(o.method).toUpperCase();
+    if (NET_METHODS.indexOf(method) < 0) throw makeError('INVALID', 'method is GET, HEAD, POST, PUT, PATCH or DELETE.');
+    params.method = method;
+    if (o.headers != null) {
+      if (!isPlainObject(o.headers)) throw makeError('INVALID', 'headers is an object of strings.');
+      var names = Object.keys(o.headers);
+      if (names.length > 32) throw makeError('INVALID', 'At most 32 headers.');
+      for (var i = 0; i < names.length; i++) {
+        var v = o.headers[names[i]];
+        if (netHeaderForbidden(names[i])) throw makeError('NET_HEADER_FORBIDDEN', 'Batiyao sets or refuses the header ' + names[i] + '.');
+        if (!names[i] || typeof v !== 'string' || v.length > 8192 || /[\r\n]/.test(names[i] + v)) {
+          throw makeError('INVALID', 'Header values are text of at most 8 KB, with no line breaks.');
+        }
+      }
+      params.headers = o.headers;
+    }
+    if (o.body != null) {
+      if (method === 'GET' || method === 'HEAD') throw makeError('INVALID', 'GET and HEAD take no body.');
+      if (typeof o.body !== 'string' && !isBlob(o.body)) throw makeError('INVALID', 'body is text or a Blob.');
+      var size = typeof o.body === 'string' ? utf8Bytes(o.body) : o.body.size;
+      if (size > NET_BODY_MAX) throw makeError('NET_TOO_LARGE', 'A body is at most 20 MB.');
+      params.body = o.body;
+    }
+    var response = o.response == null ? 'text' : o.response;
+    if (NET_RESPONSES.indexOf(response) < 0) throw makeError('INVALID', 'response is text, json, blob or file.');
+    params.response = response;
+    if (response === 'file') {
+      var e = checkFileName(o.name);
+      if (e) throw e;
+      params.name = o.name;
+    }
+    if (o.timeout_ms != null) {
+      if (!isWhole(o.timeout_ms) || o.timeout_ms < 1000 || o.timeout_ms > 600000) throw makeError('INVALID', 'timeout_ms is 1000 to 600000.');
+      params.timeout_ms = o.timeout_ms;
+    }
+    return params;
   }
 
   var CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/;
@@ -664,6 +740,59 @@
       /** Resolves { bytes, limit, count, max_files }. */
       usage: function () {
         return send('files.usage', {}, 20000);
+      }
+    },
+
+    /**
+     * Read your approved addresses (manifest.json "network") even when they
+     * send no CORS headers. The Batiyao phone app makes the request on the
+     * phone itself — only to your approved addresses (every redirect
+     * re-checked), never to the phone or its local network, with no cookies
+     * and nothing of the person's, and a User-Agent of its own. Phone apps
+     * only: on batiyao.com supports('net') is false and calls reject
+     * UNKNOWN_METHOD. An admin switches it on for your app (declare
+     * "net.fetch" in "capabilities" and have each source's permission);
+     * check supports('net'). Limits: 4 at once, 120 a minute, 500 MB a run,
+     * 10 MB of text or JSON, 50 MB a blob or file, a 20 MB body.
+     */
+    net: {
+      /**
+       * fetch(url, { method, headers, body, response: 'text' | 'json' |
+       * 'blob' | 'file', name, timeout_ms, onProgress }). Resolves
+       * { status, status_text, url, headers } with text, json,
+       * { blob, type, size } or { file: { name, type, kind, size, saved_at } }
+       * ('file' keeps it with Batiyao.files under name). A 4xx or 5xx is an
+       * answer, not an error. The promise carries .requestId for cancel().
+       */
+      fetch: function (url, options) {
+        var o = options || {};
+        netCounter += 1;
+        var rid = 'n' + netCounter + '-' + Date.now().toString(36);
+        var p;
+        try {
+          var params = checkNetFetch(url, o);
+          if (o.request_id != null) {
+            if (typeof o.request_id !== 'string' || !NET_ID_RE.test(o.request_id)) throw makeError('INVALID', 'request_id is 1-64 letters, digits, "_", ".", ":" or "-".');
+            rid = o.request_id;
+          }
+          params.request_id = rid;
+          var long = params.response === 'blob' || params.response === 'file';
+          var wait = (params.timeout_ms || (long ? 600000 : 60000)) + 30000;
+          p = withFeature('net', 'net.fetch', function () {
+            if (typeof o.onProgress === 'function') netProgress[rid] = o.onProgress;
+            var done = function () { delete netProgress[rid]; };
+            return send('net.fetch', params, wait).then(function (r) { done(); return r; }, function (e) { done(); throw e; });
+          });
+        } catch (e) {
+          p = Promise.reject(e);
+        }
+        p.requestId = rid;
+        return p;
+      },
+      /** Stop a running fetch (the promise rejects NET_CANCELLED). Resolves {}. */
+      cancel: function (requestId) {
+        if (typeof requestId !== 'string' || !NET_ID_RE.test(requestId)) return Promise.reject(makeError('INVALID', 'cancel() takes a request id.'));
+        return withFeature('net', 'net.cancel', function () { return send('net.cancel', { request_id: requestId }, 20000); });
       }
     },
 

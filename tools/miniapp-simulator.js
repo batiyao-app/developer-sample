@@ -38,6 +38,14 @@
 // "Admin review (simulated)" on the page lists each declared address and AI
 // capability with Approve / Decline; all start approved.
 //
+// net.fetch (SDK 1.8.0): the simulator stands in for the phone app's native
+// request (lib/miniapp-net.js, made from this Node process on your machine),
+// under the phone's rules: only when "net.fetch" is declared in
+// "capabilities" and approved in the admin review, only to the declared and
+// approved addresses (every redirect re-checked), never a private or local
+// address, no cookies, Batiyao's User-Agent. On batiyao.com it isn't
+// available (a browser can't get around CORS): supports('net') is false.
+//
 // Links and invites (SDK 1.5.0): open http://localhost:3100/?join=ABC234 to
 // start the app as if from an invite link (getContext().link is
 // { join: 'ABC234' }); the page's "Follow a link" button sends the 'link'
@@ -51,7 +59,8 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
-const { checkBundle, origins, sourceList, connectionAllowlist } = require('../lib/miniapp-rules');
+const { checkBundle, origins, sourceList, connectionAllowlist, originAllows } = require('../lib/miniapp-rules');
+const netFetch = require('../lib/miniapp-net');
 const { readFolder } = require('./pack-miniapp');
 const social = require('../lib/miniapp-social');
 
@@ -204,10 +213,13 @@ const aiMode = () => document.getElementById('ai-mode').value;
 const DECLARED = MANIFEST.capabilities || {};
 // Capabilities the simulated admin declined: unavailable, as on Batiyao.
 const CAPS_DECLINED = new Set();
-const capState = (n) => (CAPS_DECLINED.has(n) ? 'unavailable' : aiMode());
+const capState = (n) => (CAPS_DECLINED.has(n) ? 'unavailable' : n === 'net.fetch' ? 'ready' : aiMode());
+// net.fetch (1.8.0): declared, and not declined in the simulated admin review.
+const netOn = () => !!DECLARED['net.fetch'] && !CAPS_DECLINED.has('net.fetch');
 const aiCaps = () => Object.fromEntries(Object.entries(DECLARED).map(([n, c]) => [n, { version: c.version, state: capState(n), tools: c.tools || [] }]));
 const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname', 'network', 'files', 'shareMedia'].concat(mpMode() === 'off' ? [] : ['multiplayer', 'invite', 'shareInvite'])
-  .concat(aiMode() === 'unavailable' ? [] : Object.keys(DECLARED).filter((n) => !CAPS_DECLINED.has(n)));
+  .concat(aiMode() === 'unavailable' ? [] : Object.keys(DECLARED).filter((n) => n.startsWith('ai.') && !CAPS_DECLINED.has(n)))
+  .concat(netOn() ? ['net'] : []);
 let aiRunning = null;
 let nicking = null;
 const KEYRE = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -517,7 +529,7 @@ function renderAdmin(state) {
   const box = document.getElementById('admin-items');
   box.textContent = '';
   const items = state.network.map((x) => ({ kind: 'network', label: 'Network ' + x.name, ...x }))
-    .concat(state.caps.map((x) => ({ kind: 'caps', label: 'AI ' + x.name, ...x })));
+    .concat(state.caps.map((x) => ({ kind: 'caps', label: (x.name === 'net.fetch' ? 'Downloads ' : 'AI ') + x.name, ...x })));
   if (!items.length) { box.textContent = 'Nothing declared that needs an admin (network, capabilities).'; return; }
   CAPS_DECLINED.clear();
   for (const it of items) {
@@ -677,21 +689,123 @@ async function filesTx(mode, fn) {
 }
 const fileRows = async () => (await filesTx('readonly', (st) => st.index('space').getAll(SPACE))) || [];
 const fileInfo = (r) => ({ name: r.name, type: r.type, kind: r.kind, size: r.size, saved_at: r.saved_at });
+const fileErr = (code, message) => Object.assign(new Error(message), { code });
+// keepFile applies Batiyao's rules to one file (files.save, and net.fetch's
+// response: 'file'); it throws an error with the code.
+async function keepFile(name, file) {
+  if (typeof name !== 'string' || !FILE_NAME_RE.test(name)) throw fileErr('INVALID_NAME', 'A file name is 1-128 letters, digits, "_", "." or "-", not starting with "." or "-".');
+  if (!(file instanceof Blob) || file.size === 0) throw fileErr('INVALID', 'files.save() needs a non-empty Blob.');
+  if (file.size > FILE_MAX) throw fileErr('FILE_TOO_LARGE', 'A file is at most 50 MB.');
+  const t = sniffType(new Uint8Array(await file.slice(0, 16).arrayBuffer()), file.type);
+  if (!t) throw fileErr('UNSUPPORTED_TYPE', 'Only pictures (PNG, JPEG, GIF, WebP), sounds (WAV, MP3, M4A, Ogg, WebM) and videos (MP4, WebM) can be kept.');
+  const all = await fileRows();
+  const old = all.find((r) => r.name === name);
+  const used = all.reduce((n, r) => n + r.size, 0) - (old ? old.size : 0);
+  if (!old && all.length >= SPACE_FILES) throw fileErr('STORAGE_FULL', 'At most 500 files per app.');
+  if (used + file.size > SPACE_MAX) throw fileErr('STORAGE_FULL', 'This app’s 200 MB on this device is full.');
+  const row = { k: SPACE + '/' + name, space: SPACE, name, type: t.type, kind: t.kind, size: file.size, saved_at: new Date().toISOString(), blob: file.slice(0, file.size, t.type) };
+  await filesTx('readwrite', (st) => st.put(row));
+  return fileInfo(row);
+}
+// --- net.fetch (1.8.0): the simulator's Node process stands in for the
+// phone app's native request (lib/miniapp-net.js); this page relays it,
+// sends progress, and shows Batiyao's "downloading from" strip after 2 s.
+const NET_LIMIT = { text: 10485760, json: 10485760, blob: 52428800, file: 52428800 };
+const netRunning = new Map();
+let netTimes = [], netBytes = 0;
+function netStrip() {
+  let el = document.getElementById('net-strip');
+  const shown = [...netRunning.values()].filter((r) => r.shown);
+  if (!shown.length) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'net-strip';
+    el.style.cssText = 'position:absolute;left:8px;right:8px;bottom:8px;background:#0f172a;color:#fff;padding:8px 10px;border-radius:10px;display:flex;gap:8px;align-items:center;font-size:13px';
+    document.getElementById('stage').appendChild(el);
+  }
+  const r = shown[0];
+  const pct = r.total ? ' ' + Math.round((100 * r.received) / r.total) + '%' : '';
+  el.textContent = MANIFEST.name + ' is downloading from ' + r.host + pct + ' ';
+  const b = document.createElement('button');
+  b.textContent = 'Cancel';
+  b.onclick = () => { for (const x of netRunning.values()) x.ctl.abort(); log('net.fetch cancelled by the person', 'ev'); };
+  el.appendChild(b);
+}
+const blobToBase64 = (blob) => new Promise((resolve) => { const fr = new FileReader(); fr.onload = () => resolve(String(fr.result).split(',')[1] || ''); fr.readAsDataURL(blob); });
+const NET = {
+  'net.fetch': async (m, p) => {
+    if (!netOn()) return reply(m.id, null, { code: 'UNKNOWN_METHOD', message: 'net.fetch isn’t declared, or the simulated admin declined it.' });
+    if (netRunning.size >= 4) return reply(m.id, null, { code: 'NET_BUSY', message: 'At most 4 net.fetch requests at once.' });
+    const now = Date.now();
+    netTimes = netTimes.filter((t) => now - t < 60000);
+    if (netTimes.length >= 120) return reply(m.id, null, { code: 'NET_RATE_LIMITED', message: 'At most 120 net.fetch requests a minute.' });
+    if (netBytes >= 500 * 1048576) return reply(m.id, null, { code: 'NET_QUOTA', message: 'This run has read 500 MB.' });
+    netTimes.push(now);
+    const response = p.response || 'text';
+    if (!NET_LIMIT[response]) return reply(m.id, null, { code: 'INVALID', message: 'response is text, json, blob or file.' });
+    if (response === 'file' && (typeof p.name !== 'string' || !FILE_NAME_RE.test(p.name))) return reply(m.id, null, { code: 'INVALID_NAME', message: 'A file name is 1-128 letters, digits, "_", "." or "-".' });
+    const rid = typeof p.request_id === 'string' ? p.request_id : m.id;
+    let host = '';
+    try { host = new URL(p.url).host; } catch (e) { /* the server refuses it */ }
+    const run = { ctl: new AbortController(), host, received: 0, total: null, shown: false };
+    netRunning.set(rid, run);
+    const timer = setTimeout(() => { run.shown = true; netStrip(); }, 2000);
+    let lastEvent = 0;
+    const progress = (force) => {
+      const t = Date.now();
+      if (!force && t - lastEvent < 250) return;
+      lastEvent = t;
+      frame.contentWindow.postMessage({ batiyao: 1, event: 'net.progress', data: { request_id: rid, received: run.received, total: run.total } }, '*');
+      if (run.shown) netStrip();
+    };
+    try {
+      const q = { url: p.url, method: p.method, headers: p.headers, response, timeout_ms: p.timeout_ms };
+      if (p.body instanceof Blob) q.body_b64 = await blobToBase64(p.body);
+      else if (typeof p.body === 'string') q.body_text = p.body;
+      const res = await fetch('/sim/net', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(q), signal: run.ctl.signal });
+      if (!res.ok) {
+        const e = (await res.json().catch(() => ({}))).error || { code: 'NET_FAILED', message: 'The simulator couldn’t make the request.' };
+        return reply(m.id, null, e);
+      }
+      const meta = JSON.parse(atob(res.headers.get('X-Sim-Net')));
+      run.total = meta.size;
+      const reader = res.body.getReader();
+      const chunks = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        run.received += value.length;
+        progress(false);
+      }
+      progress(true);
+      netBytes += run.received;
+      const blob = new Blob(chunks, { type: meta.type || 'application/octet-stream' });
+      const out = { status: meta.status, status_text: meta.status_text, url: meta.url, headers: meta.headers };
+      if (response === 'text') out.text = await blob.text();
+      else if (response === 'json') out.json = JSON.parse(await blob.text());
+      else if (response === 'blob') Object.assign(out, { blob, type: meta.type, size: blob.size });
+      else out.file = await keepFile(p.name, blob);
+      reply(m.id, out);
+    } catch (e) {
+      if (e && e.name === 'AbortError') return reply(m.id, null, { code: 'NET_CANCELLED', message: 'Cancelled.' });
+      reply(m.id, null, { code: (e && e.code) || 'NET_FAILED', message: String((e && e.message) || e) });
+    } finally {
+      clearTimeout(timer);
+      netRunning.delete(rid);
+      netStrip();
+    }
+  },
+  'net.cancel': async (m, p) => {
+    const run = netRunning.get(p.request_id);
+    if (run) run.ctl.abort();
+    reply(m.id, {});
+  },
+};
 const FILES = {
+  ...NET,
   'files.save': async (m, p) => {
-    if (typeof p.name !== 'string' || !FILE_NAME_RE.test(p.name)) return reply(m.id, null, { code: 'INVALID_NAME', message: 'A file name is 1-128 letters, digits, "_", "." or "-", not starting with "." or "-".' });
-    if (!(p.file instanceof Blob) || p.file.size === 0) return reply(m.id, null, { code: 'INVALID', message: 'files.save() needs a non-empty Blob.' });
-    if (p.file.size > FILE_MAX) return reply(m.id, null, { code: 'FILE_TOO_LARGE', message: 'A file is at most 50 MB.' });
-    const t = sniffType(new Uint8Array(await p.file.slice(0, 16).arrayBuffer()), p.file.type);
-    if (!t) return reply(m.id, null, { code: 'UNSUPPORTED_TYPE', message: 'Only pictures (PNG, JPEG, GIF, WebP), sounds (WAV, MP3, M4A, Ogg, WebM) and videos (MP4, WebM) can be kept.' });
-    const all = await fileRows();
-    const old = all.find((r) => r.name === p.name);
-    const used = all.reduce((n, r) => n + r.size, 0) - (old ? old.size : 0);
-    if (!old && all.length >= SPACE_FILES) return reply(m.id, null, { code: 'STORAGE_FULL', message: 'At most 500 files per app.' });
-    if (used + p.file.size > SPACE_MAX) return reply(m.id, null, { code: 'STORAGE_FULL', message: 'This app’s 200 MB on this device is full.' });
-    const row = { k: SPACE + '/' + p.name, space: SPACE, name: p.name, type: t.type, kind: t.kind, size: p.file.size, saved_at: new Date().toISOString(), blob: p.file.slice(0, p.file.size, t.type) };
-    await filesTx('readwrite', (st) => st.put(row));
-    reply(m.id, Object.assign({ saved: true }, fileInfo(row)));
+    reply(m.id, Object.assign({ saved: true }, await keepFile(p.name, p.file)));
   },
   'files.get': async (m, p) => {
     if (typeof p.name !== 'string' || !FILE_NAME_RE.test(p.name)) return reply(m.id, null, { code: 'INVALID_NAME', message: 'That isn’t a file name.' });
@@ -793,6 +907,42 @@ window.addEventListener('message', (e) => {
 const NICK_OFFER_MS = 60 * 60 * 1000;
 const MP = { minPlayers: 2, maxPlayers: 8, metaBytes: 256, dataBytes: 1024, perSecond: 20, burst: 40,
   matchesPerApp: 500, idleMs: 10 * 60 * 1000, lifetimeMs: 4 * 60 * 60 * 1000 };
+
+// net.fetch, standing in for the phone app's native request: the page posts
+// { url, method, headers, body_b64 | body_text,
+// response, timeout_ms }; the answer is the bytes, with what Batiyao says
+// about them in X-Sim-Net (base64 JSON). A closed request cancels.
+function simNet(req, res, ctx) {
+  const chunks = [];
+  let size = 0;
+  req.on('data', (c) => { size += c.length; if (size > 30 * 1024 * 1024) req.destroy(); else chunks.push(c); });
+  req.on('end', async () => {
+    const answerError = (e) => {
+      if (res.headersSent) return res.destroy();
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ error: { code: (e && e.code) || 'NET_FAILED', message: String((e && e.message) || e) } }));
+    };
+    let q;
+    try { q = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch (e) { return answerError({ code: 'INVALID', message: 'Bad request.' }); }
+    if (!ctx.on()) return answerError({ code: 'UNKNOWN_METHOD', message: 'net.fetch isn’t declared in "capabilities", or the simulated admin declined it.' });
+    const allowed = ctx.origins();
+    const abort = new AbortController();
+    res.on('close', () => { if (!res.writableFinished) abort.abort(); });
+    try {
+      const out = await netFetch.fetchOnce({
+        url: q.url, method: q.method, headers: q.headers, response: q.response, timeoutMs: q.timeout_ms, slug: ctx.slug,
+        body: q.body_b64 != null ? Buffer.from(q.body_b64, 'base64') : q.body_text != null ? q.body_text : null,
+        allowed: (u) => allowed.some((o) => originAllows(o, u)), signal: abort.signal,
+      });
+      const meta = { status: out.status, status_text: out.status_text, url: out.url, headers: out.headers, type: out.type, size: out.body.length };
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store',
+        'X-Sim-Net': Buffer.from(JSON.stringify(meta)).toString('base64'), 'Content-Length': out.body.length });
+      res.end(out.body);
+    } catch (e) {
+      answerError(e);
+    }
+  });
+}
 
 function createSimState() {
   const sim = { nicknames: new Map(), offers: new Map(), records: new Map(), matches: new Map(), conns: new Map(), testMode: true,
@@ -1114,9 +1264,13 @@ function main(argv) {
   };
   // What the simulated admin approved, of what is declared now.
   const approvedNet = () => currentNet().filter((o) => !sim.declined.network.has(o));
+  // net.fetch (SDK 1.8.0): declared in "capabilities" and not declined in
+  // the simulated admin review, and only to the approved addresses.
+  const netFetchOn = () => sim.declared().caps.includes('net.fetch') && !sim.declined.caps.has('net.fetch');
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, base);
     if (url.pathname === '/sim/api' && req.method === 'POST') return simAPI(sim, req, res);
+    if (url.pathname === '/sim/net' && req.method === 'POST') return simNet(req, res, { on: netFetchOn, origins: approvedNet, slug: slugOf(manifest) });
     if (url.pathname === '/sim/mp/events') return simEvents(sim, url, req, res);
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });

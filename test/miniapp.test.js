@@ -111,7 +111,7 @@ const code = (p) => p.then(() => 'resolved', (e) => e.code);
 
 test('pickImage and pickVideo check their options before asking Batiyao', async () => {
   const { Batiyao, sent } = sdkWith(() => ({ result: { status: 'cancelled' } }));
-  assert.strictEqual(Batiyao.version, '1.7.0');
+  assert.strictEqual(Batiyao.version, '1.8.0');
   for (const bad of [10, 5000, 1.5, '512']) assert.strictEqual(await code(Batiyao.pickImage({ max_size: bad })), 'INVALID');
   for (const bad of [0, 601, 'x', Infinity]) assert.strictEqual(await code(Batiyao.pickVideo({ max_seconds: bad })), 'INVALID');
   assert.strictEqual(sent.length, 0);
@@ -669,6 +669,155 @@ test('the simulator shares an invite only from a match', async () => {
     const html = await (await fetch('http://127.0.0.1:31096/')).text();
     assert.match(html, /share\(\{ invite: true \}\) works while the person is in a match/);
     assert.match(html, /'shareInvite'/);
+  } finally {
+    server.close();
+  }
+});
+
+// --- 1.8.0: net.fetch ---
+const netlib = require('../lib/miniapp-net');
+
+test('net.fetch is a capability; its version is optional; it needs an address', () => {
+  const files = readFolder(WINGBEAT);
+  const m = JSON.parse(files.find((f) => f.path === 'manifest.json').data);
+  const net = [{ url: 'https://radio.example.com', purpose: 'The station list and its streams.' }];
+  const check = (extra) => checkBundle(withFile(files, 'manifest.json', JSON.stringify({ ...m, ...extra }))).problems;
+  assert.deepStrictEqual(check({ network: net, capabilities: { 'net.fetch': { purpose: 'Reads the station list, which sends no CORS.' } } }), []);
+  assert.ok(check({ capabilities: { 'net.fetch': { purpose: 'Reads the station list, which sends no CORS.' } } }).some((p) => p.includes('declare at least one')));
+  assert.ok(check({ network: net, capabilities: { 'net.fetch': { version: 2, purpose: 'Reads the station list, which sends no CORS.' } } }).some((p) => p.includes('"version" must be')));
+  assert.deepStrictEqual(check({ network: net, requires: ['net.fetch'], capabilities: { 'net.fetch': { purpose: 'Reads the station list, which sends no CORS.' } } }), []);
+});
+
+test('SDK net.fetch checks before asking, needs the feature, and routes progress and cancel', async () => {
+  const withNet = sdkWith((m) => (m === 'getContext' ? { result: { features: ['net'] } } : m === 'net.fetch' ? { result: { status: 200, status_text: 'OK', url: 'u', headers: {}, text: 'hi' } } : { result: {} }));
+  const B = withNet.Batiyao;
+  for (const [args, want] of [
+    [['http://radio.example.com/x'], 'INVALID'],
+    [['https://radio.example.com/x', { headers: { Cookie: 'a=b' } }], 'NET_HEADER_FORBIDDEN'],
+    [['https://radio.example.com/x', { headers: { 'Sec-Fetch-Mode': 'cors' } }], 'NET_HEADER_FORBIDDEN'],
+    [['https://radio.example.com/x', { body: 'x' }], 'INVALID'],
+    [['https://radio.example.com/x', { method: 'TRACE' }], 'INVALID'],
+    [['https://radio.example.com/x', { response: 'stream' }], 'INVALID'],
+    [['https://radio.example.com/x', { response: 'file' }], 'INVALID_NAME'],
+    [['https://radio.example.com/x', { timeout_ms: 10 }], 'INVALID'],
+    [['https://radio.example.com/x', { headers: { 'X-A': 'a\nb' } }], 'INVALID'],
+  ]) {
+    assert.strictEqual(await code(B.net.fetch(...args)), want, JSON.stringify(args));
+  }
+  const p = B.net.fetch('https://radio.example.com/list', { method: 'post', body: 'q=1', headers: { 'X-Api-Key': 'k' }, response: 'text' });
+  assert.match(p.requestId, /^[A-Za-z0-9_.:-]{1,64}$/);
+  const r = await p;
+  assert.strictEqual(r.text, 'hi');
+  const sent = withNet.sent.find((x) => x.method === 'net.fetch');
+  assert.strictEqual(JSON.stringify(sent.params), JSON.stringify({ url: 'https://radio.example.com/list', method: 'POST', headers: { 'X-Api-Key': 'k' }, body: 'q=1', response: 'text', request_id: p.requestId }));
+  assert.strictEqual(await B.supports('net.fetch'), true);
+  await B.net.cancel(p.requestId);
+  assert.ok(withNet.sent.some((x) => x.method === 'net.cancel' && x.params.request_id === p.requestId));
+  // Progress goes to the callback of its own request.
+  const seen = [];
+  const slow = sdkWith((m) => (m === 'getContext' ? { result: { features: ['net'] } } : { result: { status: 200, headers: {}, text: '' } }));
+  const q = slow.Batiyao.net.fetch('https://radio.example.com/big', { onProgress: (x) => seen.push(x) });
+  await new Promise((res) => setImmediate(res));
+  slow.emit('net.progress', { request_id: q.requestId, received: 5, total: 10 });
+  slow.emit('net.progress', { request_id: 'someone-else', received: 1, total: 1 });
+  await q;
+  assert.strictEqual(JSON.stringify(seen), JSON.stringify([{ received: 5, total: 10 }]));
+  const older = sdkWith((m) => (m === 'getContext' ? { result: { features: ['files'] } } : { result: {} }));
+  assert.strictEqual(await code(older.Batiyao.net.fetch('https://radio.example.com/x')), 'UNKNOWN_METHOD');
+  assert.ok(!older.sent.some((x) => x.method === 'net.fetch'));
+});
+
+test('net.fetch never reaches a private address and refuses what Batiyao refuses', async () => {
+  for (const [ip, want] of Object.entries({ '8.8.8.8': true, '2606:4700:4700::1111': true, '127.0.0.1': false, '10.0.0.5': false,
+    '192.168.1.1': false, '169.254.169.254': false, '100.64.0.1': false, '::1': false, 'fd00::1': false, 'fe80::1': false,
+    '::ffff:127.0.0.1': false, '::ffff:8.8.8.8': true, '64:ff9b::7f00:1': false, '64:ff9b::808:808': true, 'not-an-ip': false })) {
+    assert.strictEqual(netlib.isPublicAddress(ip), want, ip);
+  }
+  assert.ok(netlib.forbiddenHeader('Proxy-Authorization') && netlib.forbiddenHeader('x-forwarded-for') && !netlib.forbiddenHeader('Authorization'));
+  const allowed = (u) => u.startsWith('https://radio.example.com/');
+  const err = (o) => netlib.fetchOnce({ allowed, ...o }).then(() => 'resolved', (e) => e.code);
+  assert.strictEqual(await err({ url: 'https://elsewhere.example.org/' }), 'NET_NOT_ALLOWED');
+  assert.strictEqual(await err({ url: 'http://radio.example.com/' }), 'NET_NOT_ALLOWED');
+  assert.strictEqual(await err({ url: 'https://radio.example.com/', headers: { Cookie: 'a' } }), 'NET_HEADER_FORBIDDEN');
+  assert.strictEqual(await err({ url: 'https://radio.example.com/', body: 'x' }), 'INVALID');
+  const toLoopback = (host, opts, cb) => cb(null, [{ address: '127.0.0.1', family: 4 }]);
+  assert.strictEqual(await err({ url: 'https://radio.example.com/', resolve: toLoopback }), 'NET_PRIVATE_ADDRESS');
+});
+
+test('net.fetch against a local https server: user agent, cookies, redirects, JSON, limits', async (t) => {
+  const { execFileSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'netfetch-'));
+  try {
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=radio.example.com',
+      '-addext', 'subjectAltName=DNS:radio.example.com', '-keyout', path.join(dir, 'k.pem'), '-out', path.join(dir, 'c.pem')], { stdio: 'ignore' });
+  } catch (e) {
+    t.skip('openssl not available');
+    return;
+  }
+  const https = require('node:https');
+  let seen = {};
+  const srv = https.createServer({ key: fs.readFileSync(path.join(dir, 'k.pem')), cert: fs.readFileSync(path.join(dir, 'c.pem')) }, (req, res) => {
+    seen = { ua: req.headers['user-agent'], cookie: req.headers.cookie };
+    if (req.url === '/list.json') { res.setHeader('Set-Cookie', 'track=me'); res.setHeader('Content-Type', 'application/json'); return res.end('{"stations":["a"]}'); }
+    if (req.url === '/away') { res.writeHead(302, { Location: 'https://elsewhere.example.org/' }); return res.end(); }
+    if (req.url === '/near') { res.writeHead(302, { Location: '/list.json' }); return res.end(); }
+    if (req.url === '/big') { res.setHeader('Content-Length', String(netlib.MAX_TEXT + 1)); return res.end(); }
+    res.end('plain text');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  const base = 'https://radio.example.com:' + port;
+  const opts = { allowed: (u) => u.startsWith(base + '/'), slug: 'radio', ca: fs.readFileSync(path.join(dir, 'c.pem')),
+    isPublic: () => true, resolve: (host, o, cb) => cb(null, [{ address: '127.0.0.1', family: 4 }]) };
+  try {
+    const j = await netlib.fetchOnce({ ...opts, url: base + '/list.json', response: 'json' });
+    assert.strictEqual(j.status, 200);
+    assert.strictEqual(j.body.toString(), '{"stations":["a"]}');
+    assert.ok(!('set-cookie' in j.headers));
+    assert.strictEqual(seen.ua, 'Mozilla/5.0 (compatible; Batiyao-MiniApp/1; +https://batiyao.com/apps/radio)');
+    assert.strictEqual(seen.cookie, undefined);
+    const near = await netlib.fetchOnce({ ...opts, url: base + '/near', response: 'json' });
+    assert.ok(near.url.endsWith('/list.json'));
+    const code2 = (o) => netlib.fetchOnce({ ...opts, ...o }).then(() => 'resolved', (e) => e.code);
+    assert.strictEqual(await code2({ url: base + '/away' }), 'NET_NOT_ALLOWED');
+    assert.strictEqual(await code2({ url: base + '/plain', response: 'json' }), 'NET_NOT_JSON');
+    assert.strictEqual(await code2({ url: base + '/big' }), 'NET_TOO_LARGE');
+  } finally {
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the simulator lets net.fetch through only when declared and approved', async () => {
+  const fs = require('node:fs');
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'mini-net-'));
+  for (const f of readFolder(WINGBEAT)) {
+    fs.mkdirSync(path.join(dir, path.dirname(f.path)), { recursive: true });
+    let data = f.data;
+    if (f.path === 'manifest.json') {
+      data = Buffer.from(JSON.stringify({ ...JSON.parse(f.data), network: [{ url: 'https://radio.example.com', purpose: 'The station list and its streams.' }],
+        capabilities: { 'net.fetch': { purpose: 'Reads the station list, which sends no CORS.' } } }));
+    }
+    fs.writeFileSync(path.join(dir, f.path), data);
+  }
+  const server = simulator.main([dir, '--port', '31095']);
+  await new Promise((r) => server.once('listening', r));
+  const net = (body) => fetch('http://127.0.0.1:31095/sim/net', { method: 'POST', body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+  const op = (body) => fetch('http://127.0.0.1:31095/sim/api', { method: 'POST', body: JSON.stringify(body) }).then((r) => r.json());
+  try {
+    const html = await (await fetch('http://127.0.0.1:31095/')).text();
+    new (require('node:vm').Script)(html.split('<script>')[1].split('</script>')[0]);
+    assert.match(html, /'net\.fetch': async/);
+    assert.match(html, /is downloading from/);
+    const off = await net({ url: 'https://elsewhere.example.org/', response: 'text' });
+    assert.strictEqual(off.body.error.code, 'NET_NOT_ALLOWED');
+    const listed = await op({ op: 'admin.get' });
+    assert.ok(listed.result.caps.some((c) => c.name === 'net.fetch' && c.approved));
+    await op({ op: 'admin.set', kind: 'caps', name: 'net.fetch', approved: false });
+    const declined = await net({ url: 'https://radio.example.com/', response: 'text' });
+    assert.strictEqual(declined.body.error.code, 'UNKNOWN_METHOD');
   } finally {
     server.close();
   }

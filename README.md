@@ -253,6 +253,38 @@ The rules that shape the code:
   person per app, never uploaded and only on that device. Pictures and
   sounds from `Batiyao.ai` fit straight in. Check `supports('files')`.
   Details: <https://developer.batiyao.com/miniapps.md> section 10.4.
+- **Read a source that sends no CORS headers with `Batiyao.net.fetch`**
+  (SDK 1.8.0) — a media source or feed on one of your approved addresses
+  whose answer your `fetch()` can't read. **Phone apps only:** the Batiyao
+  phone app makes the request on the phone; on batiyao.com
+  `supports('net')` is false and calls reject `UNKNOWN_METHOD` (a browser
+  can't get around CORS), so keep a plain `fetch()` path for the website.
+  Declare it — `"capabilities": {"net.fetch": {"purpose": "Reads the
+  station list, which sends no CORS."}}` (needs a `network` address) — and
+  a Batiyao admin switches it on for your app, asking for your evidence that
+  you may download from each source.
+
+  ```js
+  if (await Batiyao.supports('net')) {
+    const p = Batiyao.net.fetch('https://radio.example.com/stations.json', {
+      response: 'json', onProgress: ({ received, total }) => bar(received, total) });
+    const r = await p;                      // { status, status_text, url, headers, json }
+    // response: 'text' | 'json' | 'blob' ({ blob, type, size }) | 'file' (kept with Batiyao.files under `name`)
+    // Batiyao.net.cancel(p.requestId) stops it.
+  }
+  ```
+
+  Only your approved addresses (every redirect re-checked), never the
+  phone's own network, no cookies, Batiyao's own User-Agent; some headers
+  (Cookie, Origin, User-Agent, Sec-*, …) are Batiyao's (`NET_HEADER_FORBIDDEN`).
+  Limits: 4 at once, 120 a minute, 500 MB a run, 10 MB text/JSON, 50 MB a
+  blob or file, 20 MB body. A 4xx/5xx is an answer, not an error; errors are
+  `NET_NOT_ALLOWED`, `NET_PRIVATE_ADDRESS`, `NET_TOO_LARGE`, `NET_TIMEOUT`,
+  `NET_CANCELLED`, `NET_NOT_JSON`, `NET_BUSY`, `NET_RATE_LIMITED`,
+  `NET_QUOTA`, `NET_FAILED`. The simulator stands in for the phone: it
+  makes the request from your machine under the same rules, only when
+  `net.fetch` and the address are declared and approved in its Admin review
+  panel. Details: <https://developer.batiyao.com/miniapps.md> (section 13.1).
 - **Photos and videos come from Batiyao's picker.** A file input in your
   app opens nothing. Call `Batiyao.pickImage({ max_size })` or
   `Batiyao.pickVideo({ max_seconds })` from a tap: Batiyao shows its own
