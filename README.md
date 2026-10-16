@@ -196,6 +196,23 @@ The rules that shape the code:
   is example.com **and all its subdomains**; it is its own entry, approved
   explicitly (approving example.com never covers a subdomain), and it must be
   over a domain you own — `*.com`, `*.co.uk`, `*.github.io` are refused.
+  **Testing network access in the simulator** — no account or approval
+  needed; the simulator treats every declared address as already approved:
+  1. Add the address to `manifest.json`, e.g.
+     `"network": [{"url": "https://api.yourgame.com", "purpose": "Saves scores."}]`
+     (or `https://*.yourgame.com` for the domain and all its subdomains).
+  2. `npm run miniapp -- path/to/your/folder` (or press **Reload** if it is
+     running) and open http://localhost:3100. The terminal prints
+     `network: https://api.yourgame.com is let through`.
+  3. Your server must answer `Origin: null` with CORS
+     (`Access-Control-Allow-Origin: *`, and the `OPTIONS` preflight for
+     JSON/headers), without cookies.
+  4. In the browser console, a *CSP* error means the host isn't declared
+     exactly; a *CORS* error means your server's headers. Everything not
+     declared stays blocked, as on Batiyao.
+  5. `npm run pack:miniapp` checks the addresses the way Batiyao's upload
+     does; after upload, a **Test** run on Batiyao reaches them before an
+     admin decides.
   The simulator re-reads `manifest.json` on every load, so an address you add
   is let through on **Reload**. Blocked anyway? The console says why: a CSP
   error means the host isn't declared (exactly — subdomains need their own

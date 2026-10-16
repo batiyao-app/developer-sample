@@ -1012,6 +1012,14 @@ function main(argv) {
   }
   for (const p of problems) console.warn(`upload would refuse: ${p}`);
   for (const f of flags) console.warn(`note: ${f} — an admin will look at this before it goes live.`);
+  // The simulator plays the app as if a Batiyao admin had already approved
+  // everything its manifest declares (owner, 2026-10-16): the addresses in
+  // "network", the AI in "capabilities", and multiplayer. The page's
+  // switches try the other answers.
+  const declaredCaps = Object.keys(manifest.capabilities || {});
+  console.log('Approved for this simulation (as if a Batiyao admin had said yes): ' +
+    [origins(manifest).length ? `network ${origins(manifest).join(', ')}` : 'no network addresses declared',
+      declaredCaps.length ? `AI ${declaredCaps.join(', ')}` : null, 'multiplayer'].filter(Boolean).join('; '));
   // The declared addresses are read from manifest.json on every request, so
   // adding or changing "network" shows on Reload, like any other edit (they
   // used to be read once at start, and an address added later stayed blocked).
@@ -1024,7 +1032,7 @@ function main(argv) {
     if (key !== shownNet) {
       shownNet = key;
       if (!net.length) console.log('network: none declared — every address is blocked');
-      for (const o of net) console.log(`network: ${o} is let through (on Batiyao, only once an admin approves it)`);
+      for (const o of net) console.log(`network: ${o} is let through (approved in the simulator; on Batiyao, once an admin approves it)`);
     }
     return net;
   };
