@@ -253,6 +253,40 @@ The rules that shape the code:
   person per app, never uploaded and only on that device. Pictures and
   sounds from `Batiyao.ai` fit straight in. Check `supports('files')`.
   Details: <https://developer.batiyao.com/miniapps.md> section 10.4.
+- **Let Batiyao play your sound with `Batiyao.audio`** (SDK 1.9.0):
+  `audio.play({ src, title, artist, background })` or
+  `audio.play({ tracks, index, background })`, then `pause`, `resume`,
+  `stop`, `seek(ms)`, `next`, `previous`, `state`. Your app hands over
+  tracks — a file of its own (`{ file: 'lesson1.mp3' }`), a `Blob` it made,
+  or an https address of yours it may read — and **Batiyao's own player**
+  (the one voice messages use) plays them, with its bar above your app. One
+  player, one app at a time; the person can always stop it.
+
+  ```js
+  if (await Batiyao.supports('audio')) {
+    playButton.onclick = async () => {        // from a tap
+      const st = await Batiyao.audio.play({
+        tracks: [{ src: { file: 'lesson1.mp3' }, title: 'Lesson one', artist: 'Teacher' }],
+        background: true,                     // carry on when the person leaves
+      });
+      nowPlaying(st);                         // { state, track, tracks, title, artist, position_ms, duration_ms, background }
+    };
+    Batiyao.on('audio.state', nowPlaying);    // the person paused, a track ended
+  }
+  ```
+
+  Playing on after the person leaves Batiyao or locks the screen needs
+  **both** a Batiyao admin's grant — declare
+  `"capabilities": {"media.background": {"purpose": "Plays the lesson you
+  picked while your screen is off."}}`, and ask only if your app is
+  something people listen to — **and** the person's own yes on Batiyao's
+  sheet. Without both, the sound stops when your app does;
+  `supports('backgroundAudio')` tells you about the grant. Your app's code
+  always ends when it closes: only the sound goes on. Errors: `INVALID`,
+  `NOT_FOUND`, `NOT_AUDIO`, `FILE_TOO_LARGE`, `NET_NOT_ALLOWED`,
+  `NET_PRIVATE_ADDRESS`, `NET_FAILED`, `AUDIO_UNAVAILABLE`, `BUSY`,
+  `NEEDS_TAP`. The simulator stands in for Batiyao's player, bar and sheet
+  included. Details: <https://developer.batiyao.com/miniapps.md> section 10.5.
 - **Read a source that sends no CORS headers with `Batiyao.net.fetch`**
   (SDK 1.8.0) — a media source or feed on one of your approved addresses
   whose answer your `fetch()` can't read. **Phone apps only:** the Batiyao

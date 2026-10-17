@@ -38,6 +38,13 @@
 // "Admin review (simulated)" on the page lists each declared address and AI
 // capability with Approve / Decline; all start approved.
 //
+// audio (SDK 1.9.0): the simulator stands in for Batiyao's own player — the
+// one voice messages use. The app hands over tracks ({ file } of its own, a
+// Blob, or an approved address) and the page plays them, with Batiyao's bar
+// above the app and its "Keep playing when you leave?" sheet the first time
+// an app asks for background playing (granted only when "media.background"
+// is declared and the simulated admin review approves it).
+//
 // net.fetch (SDK 1.8.0): the simulator stands in for the phone app's native
 // request (lib/miniapp-net.js, made from this Node process on your machine),
 // under the phone's rules: only when "net.fetch" is declared in
@@ -167,6 +174,11 @@ const HOST_PAGE = (manifest) => `<!doctype html>
     <p class="note">Whoever opens the link gets your app with getContext().link = { join: code }. Your app is only told that the sheet closed.</p>
     <div class="row"><button id="iv-close">Close</button><button id="iv-copy" class="pay">Copy link</button></div>
   </div></div>
+  <div id="bg-sheet" class="sheetlike"><div class="card">
+    <p><b>Keep playing when you leave?</b><br><small>The sheet Batiyao draws the first time an app plays with background: true</small></p>
+    <p class="note">Batiyao can go on playing this app's sound after you leave Batiyao or lock the screen. You can stop it from the bar, the notification or the lock screen, and switch it off in the app's menu.</p>
+    <div class="row"><button id="bg-no">Not now</button><button id="bg-yes" class="pay">Keep playing</button></div>
+  </div></div>
   <div id="mp-sheet" class="sheetlike"><div class="card">
     <p><b>Playing online</b></p>
     <p class="note">A guardian needs to allow playing online in mini apps for this account. (Simulated: your app will hear "unavailable".)</p>
@@ -213,13 +225,19 @@ const aiMode = () => document.getElementById('ai-mode').value;
 const DECLARED = MANIFEST.capabilities || {};
 // Capabilities the simulated admin declined: unavailable, as on Batiyao.
 const CAPS_DECLINED = new Set();
-const capState = (n) => (CAPS_DECLINED.has(n) ? 'unavailable' : n === 'net.fetch' ? 'ready' : aiMode());
+const CAP_NOT_AI = ['net.fetch', 'media.background'];
+const capState = (n) => (CAPS_DECLINED.has(n) ? 'unavailable' : CAP_NOT_AI.includes(n) ? 'ready' : aiMode());
 // net.fetch (1.8.0): declared, and not declined in the simulated admin review.
 const netOn = () => !!DECLARED['net.fetch'] && !CAPS_DECLINED.has('net.fetch');
 const aiCaps = () => Object.fromEntries(Object.entries(DECLARED).map(([n, c]) => [n, { version: c.version, state: capState(n), tools: c.tools || [] }]));
-const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname', 'network', 'files', 'shareMedia'].concat(mpMode() === 'off' ? [] : ['multiplayer', 'invite', 'shareInvite'])
+// media.background (1.9.0): declared, and not declined in the simulated
+// admin review. The person's own "Keep playing" is asked for separately,
+// the first time the app plays with background: true.
+const bgGranted = () => !!DECLARED['media.background'] && !CAPS_DECLINED.has('media.background');
+const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname', 'network', 'files', 'shareMedia', 'audio'].concat(mpMode() === 'off' ? [] : ['multiplayer', 'invite', 'shareInvite'])
   .concat(aiMode() === 'unavailable' ? [] : Object.keys(DECLARED).filter((n) => n.startsWith('ai.') && !CAPS_DECLINED.has(n)))
-  .concat(netOn() ? ['net'] : []);
+  .concat(netOn() ? ['net'] : [])
+  .concat(bgGranted() ? ['backgroundAudio'] : []);
 let aiRunning = null;
 let nicking = null;
 const KEYRE = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -520,7 +538,8 @@ document.getElementById('pk-input').onchange = async (e) => {
 };
 document.getElementById('sh-cancel').onclick = () => endShare('cancel');
 // --- nicknames, the shared store, multiplayer (state is in the simulator's Node process) ---
-const busy = () => !!(paying || sharing || picking || nicking || inviting);
+const busy = () => !!(paying || sharing || picking || nicking || inviting || bgAsking);
+let NET_OK = [];
 const tapped = () => !navigator.userActivation || navigator.userActivation.isActive;
 // The simulated admin review: one Approve / Decline per declared address
 // and AI capability. An address change reloads the app (it is the page's
@@ -529,7 +548,9 @@ function renderAdmin(state) {
   const box = document.getElementById('admin-items');
   box.textContent = '';
   const items = state.network.map((x) => ({ kind: 'network', label: 'Network ' + x.name, ...x }))
-    .concat(state.caps.map((x) => ({ kind: 'caps', label: (x.name === 'net.fetch' ? 'Downloads ' : 'AI ') + x.name, ...x })));
+    .concat(state.caps.map((x) => ({ kind: 'caps', label: (x.name === 'net.fetch' ? 'Downloads ' : x.name === 'media.background' ? 'Background playing ' : 'AI ') + x.name, ...x })));
+  // The addresses the player may read a track from, as the frame's CSP has them.
+  NET_OK = state.network.filter((x) => x.approved).map((x) => x.name);
   if (!items.length) { box.textContent = 'Nothing declared that needs an admin (network, capabilities).'; return; }
   CAPS_DECLINED.clear();
   for (const it of items) {
@@ -707,6 +728,183 @@ async function keepFile(name, file) {
   await filesTx('readwrite', (st) => st.put(row));
   return fileInfo(row);
 }
+// --- audio (1.9.0): this page stands in for Batiyao's own player — the one
+// voice messages use. The app hands over tracks; the player plays them, with
+// Batiyao's bar above the app, and the app never touches the sound. Playing
+// on after the person leaves needs the admin's grant (media.background) and
+// the person's "Keep playing", exactly as on a phone.
+const AUDIO_MAX_TRACKS = 100;
+let player = null, queue = [], at = 0, curUrl = null, bgAsking = null, bgAllowed = null, lastSent = { sig: '', t: 0 };
+const audioErr = (code, message) => { const e = new Error(message); e.code = code; return e; };
+// Background playing: both halves, as the phone asks them.
+const bgOn = () => bgGranted() && bgAllowed === true;
+
+function audioState() {
+  if (!player || !queue.length) return { state: 'stopped', track: 0, tracks: 0, title: null, artist: null, position_ms: 0, duration_ms: null, background: bgOn() };
+  const t = queue[at];
+  const dur = isFinite(player.duration) && player.duration > 0 ? Math.round(player.duration * 1000) : null;
+  return {
+    state: player.ended && at >= queue.length - 1 ? 'stopped' : player.paused ? 'paused' : player.readyState < 3 ? 'loading' : 'playing',
+    track: at, tracks: queue.length, title: t.title || null, artist: t.artist || null,
+    position_ms: Math.max(0, Math.round(player.currentTime * 1000)), duration_ms: dur, background: bgOn(),
+  };
+}
+// The app hears every change, and the position at most once a second.
+function audioEvent() {
+  const st = audioState();
+  audioStrip(st);
+  const sig = st.state + '|' + st.track + '|' + st.tracks;
+  const now = Date.now();
+  if (sig === lastSent.sig && now - lastSent.t < 1000) return;
+  lastSent = { sig: sig, t: now };
+  frame.contentWindow.postMessage({ batiyao: 1, event: 'audio.state', data: st }, '*');
+}
+function audioStrip(st) {
+  let el = document.getElementById('audio-strip');
+  if (st.state === 'stopped') { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'audio-strip';
+    el.style.cssText = 'position:absolute;left:8px;right:8px;top:8px;background:#0f172a;color:#fff;padding:8px 10px;border-radius:10px;display:flex;gap:8px;align-items:center;font-size:13px;z-index:5';
+    document.getElementById('stage').appendChild(el);
+  }
+  el.textContent = '';
+  const txt = document.createElement('span');
+  txt.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+  const secs = (ms) => (ms == null ? '' : Math.floor(ms / 60000) + ':' + String(Math.floor((ms % 60000) / 1000)).padStart(2, '0'));
+  txt.textContent = (st.title || MANIFEST.name) + (st.artist ? ' — ' + st.artist : '') + '  ' + (st.state === 'loading' ? 'loading…' : secs(st.position_ms))
+    + (st.duration_ms ? ' / ' + secs(st.duration_ms) : '') + (st.tracks > 1 ? '  (' + (st.track + 1) + ' of ' + st.tracks + ')' : '')
+    + (st.background ? '  · keeps playing when you leave' : '');
+  el.appendChild(txt);
+  const add = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.onclick = fn; el.appendChild(b); };
+  if (st.tracks > 1) add('Prev', () => audioGo(at - 1, !player.paused).then(audioEvent).catch(() => audioEvent()));
+  add(st.state === 'paused' ? 'Play' : 'Pause', () => {
+    if (player.paused) player.play().catch(() => audioEvent()); else player.pause();
+    log('the person used Batiyao’s player', 'ev');
+  });
+  if (st.tracks > 1) add('Next', () => audioGo(at + 1, !player.paused).then(audioEvent).catch(() => audioEvent()));
+  add('Stop', () => { audioStop(); log('the person stopped the sound', 'ev'); audioEvent(); });
+}
+// The sound a track points at: one of the app's files, a Blob it made, or an
+// approved address. Nothing else ever plays.
+async function audioSrc(src) {
+  if (src instanceof Blob) {
+    if (!src.size) throw audioErr('INVALID', 'That sound is empty.');
+    if (src.size > FILE_MAX) throw audioErr('FILE_TOO_LARGE', 'A sound is at most 50 MB.');
+    const t = sniffType(new Uint8Array(await src.slice(0, 64).arrayBuffer()), src.type);
+    if (!t || t.kind !== 'audio') throw audioErr('NOT_AUDIO', 'That is not a sound Batiyao can play.');
+    return { url: URL.createObjectURL(src), revoke: true };
+  }
+  if (src && typeof src === 'object' && typeof src.file === 'string') {
+    const row = await filesTx('readonly', (st) => st.get(SPACE + '/' + src.file));
+    if (!row) throw audioErr('NOT_FOUND', 'Your app has no file called "' + src.file + '".');
+    if (row.kind !== 'audio') throw audioErr('NOT_AUDIO', '"' + row.name + '" is not a sound.');
+    return { url: URL.createObjectURL(row.blob), revoke: true };
+  }
+  const raw = typeof src === 'string' ? src : src && typeof src.url === 'string' ? src.url : null;
+  if (!raw) throw audioErr('INVALID', 'A track is { file: name }, a Blob, or an https address on your approved addresses.');
+  let u;
+  try { u = new URL(raw); } catch (e) { throw audioErr('INVALID', 'That is not an address.'); }
+  if (u.protocol !== 'https:') throw audioErr('NET_NOT_ALLOWED', 'Only https addresses play.');
+  if (/^(localhost|127\\.|10\\.|192\\.168\\.|169\\.254\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|\\[?::1)/.test(u.hostname) || !u.hostname.includes('.')) {
+    throw audioErr('NET_PRIVATE_ADDRESS', 'Batiyao never reaches this device or its own network.');
+  }
+  const ok = NET_OK.some((o) => o === u.origin || (o.startsWith('https://*.') && (u.hostname === o.slice(10) || u.hostname.endsWith('.' + o.slice(10)))));
+  if (!ok) throw audioErr('NET_NOT_ALLOWED', 'That address is not one of this app’s approved addresses (manifest.json "network").');
+  return { url: u.toString(), revoke: false };
+}
+function audioElement() {
+  if (player) return player;
+  player = new Audio();
+  player.preload = 'auto';
+  for (const ev of ['play', 'pause', 'loadedmetadata', 'timeupdate']) player.addEventListener(ev, audioEvent);
+  player.addEventListener('ended', () => {
+    if (at < queue.length - 1) audioGo(at + 1, true).then(audioEvent).catch(() => audioEvent());
+    else audioEvent();
+  });
+  return player;
+}
+async function audioGo(index, start) {
+  const t = queue[index];
+  if (!t) throw audioErr('INVALID', 'There is no such track.');
+  const next = await audioSrc(t.src);
+  const el = audioElement();
+  if (curUrl && curUrl.revoke) URL.revokeObjectURL(curUrl.url);
+  curUrl = next; at = index;
+  el.src = next.url;
+  if (start) {
+    try { await el.play(); } catch (e) {
+      if (e && e.name === 'NotSupportedError') throw audioErr('NET_FAILED', 'Batiyao could not play that sound.');
+      throw audioErr('NEEDS_TAP', 'Play a sound from a tap or click.');
+    }
+  }
+  return audioState();
+}
+function audioStop() {
+  if (player) { player.pause(); player.removeAttribute('src'); player.load(); }
+  if (curUrl && curUrl.revoke) URL.revokeObjectURL(curUrl.url);
+  curUrl = null; queue = []; at = 0;
+  audioStrip({ state: 'stopped' });
+}
+// Batiyao's sheet: may the sound carry on once the person has left?
+function askKeepPlaying() {
+  return new Promise((resolve) => {
+    bgAsking = resolve;
+    document.getElementById('bg-sheet').style.display = 'flex';
+  });
+}
+function endKeepPlaying(yes) {
+  document.getElementById('bg-sheet').style.display = 'none';
+  bgAllowed = yes;
+  const r = bgAsking; bgAsking = null;
+  log('the person chose: ' + (yes ? 'keep playing when I leave' : 'not now') + ' (switchable in the app’s menu)', 'ev');
+  if (r) r(yes);
+}
+document.getElementById('bg-yes').onclick = () => endKeepPlaying(true);
+document.getElementById('bg-no').onclick = () => endKeepPlaying(false);
+const AUDIO = {
+  'audio.play': async (m, p) => {
+    if (!tapped()) return reply(m.id, null, { code: 'NEEDS_TAP', message: 'Call audio.play() from a tap or click.' });
+    const given = Array.isArray(p.tracks) ? p.tracks : [{ src: p.src, title: p.title, artist: p.artist }];
+    if (!given.length) return reply(m.id, null, { code: 'INVALID', message: 'play() takes a track, or tracks.' });
+    if (given.length > AUDIO_MAX_TRACKS) return reply(m.id, null, { code: 'INVALID', message: 'At most ' + AUDIO_MAX_TRACKS + ' tracks at a time.' });
+    const index = Number.isInteger(p.index) ? p.index : 0;
+    if (index < 0 || index >= given.length) return reply(m.id, null, { code: 'INVALID', message: 'index is a track in the list.' });
+    // Both halves of background playing, as on a phone: the grant, then the
+    // person. Asked once a run; after that it is theirs to switch.
+    if (p.background) {
+      if (!bgGranted()) log('background: true, but media.background is not declared or the simulated admin declined it — the sound will stop with your app', 'ev');
+      else if (bgAllowed === null) { if (busy()) return reply(m.id, null, { code: 'BUSY', message: 'Batiyao is already showing a sheet.' }); await askKeepPlaying(); }
+    }
+    queue = given.map((t) => ({ src: t.src, title: typeof t.title === 'string' ? t.title.slice(0, 120) : '', artist: typeof t.artist === 'string' ? t.artist.slice(0, 120) : null }));
+    const st = await audioGo(index, true);
+    reply(m.id, st);
+    audioEvent();
+  },
+  'audio.pause': async (m) => { if (player) player.pause(); reply(m.id, audioState()); audioEvent(); },
+  'audio.resume': async (m) => {
+    if (!player || !queue.length) return reply(m.id, null, { code: 'INVALID', message: 'Nothing of yours is playing.' });
+    if (!tapped()) return reply(m.id, null, { code: 'NEEDS_TAP', message: 'Call audio.resume() from a tap or click.' });
+    try { await player.play(); } catch (e) { return reply(m.id, null, { code: 'NEEDS_TAP', message: 'Carry on playing from a tap or click.' }); }
+    reply(m.id, audioState()); audioEvent();
+  },
+  'audio.stop': async (m) => { audioStop(); reply(m.id, audioState()); audioEvent(); },
+  'audio.seek': async (m, p) => {
+    if (!Number.isFinite(p.position_ms) || p.position_ms < 0) return reply(m.id, null, { code: 'INVALID', message: 'position_ms is a number of milliseconds.' });
+    if (!player || !queue.length) return reply(m.id, null, { code: 'INVALID', message: 'Nothing of yours is playing.' });
+    player.currentTime = p.position_ms / 1000;
+    reply(m.id, audioState()); audioEvent();
+  },
+  'audio.next': async (m) => {
+    if (at >= queue.length - 1) return reply(m.id, audioState());
+    reply(m.id, await audioGo(at + 1, !player.paused)); audioEvent();
+  },
+  'audio.previous': async (m) => {
+    if (at <= 0) { if (player) player.currentTime = 0; return reply(m.id, audioState()); }
+    reply(m.id, await audioGo(at - 1, !player.paused)); audioEvent();
+  },
+  'audio.state': async (m) => reply(m.id, audioState()),
+};
 // --- net.fetch (1.8.0): the simulator's Node process stands in for the
 // phone app's native request (lib/miniapp-net.js); this page relays it,
 // sends progress, and shows Batiyao's "downloading from" strip after 2 s.
@@ -804,6 +1002,7 @@ const NET = {
 };
 const FILES = {
   ...NET,
+  ...AUDIO,
   'files.save': async (m, p) => {
     reply(m.id, Object.assign({ saved: true }, await keepFile(p.name, p.file)));
   },
@@ -1236,7 +1435,7 @@ function main(argv) {
   const declaredCaps = Object.keys(manifest.capabilities || {});
   console.log('Approved for this simulation (as if a Batiyao admin had said yes): ' +
     [origins(manifest).length ? `network ${origins(manifest).join(', ')}` : 'no network addresses declared',
-      declaredCaps.length ? `AI ${declaredCaps.join(', ')}` : null, 'multiplayer'].filter(Boolean).join('; '));
+      declaredCaps.length ? `capabilities ${declaredCaps.join(', ')}` : null, 'multiplayer'].filter(Boolean).join('; '));
   // The declared addresses are read from manifest.json on every request, so
   // adding or changing "network" shows on Reload, like any other edit (they
   // used to be read once at start, and an address added later stayed blocked).

@@ -111,7 +111,7 @@ const code = (p) => p.then(() => 'resolved', (e) => e.code);
 
 test('pickImage and pickVideo check their options before asking Batiyao', async () => {
   const { Batiyao, sent } = sdkWith(() => ({ result: { status: 'cancelled' } }));
-  assert.strictEqual(Batiyao.version, '1.8.0');
+  assert.strictEqual(Batiyao.version, '1.9.0');
   for (const bad of [10, 5000, 1.5, '512']) assert.strictEqual(await code(Batiyao.pickImage({ max_size: bad })), 'INVALID');
   for (const bad of [0, 601, 'x', Infinity]) assert.strictEqual(await code(Batiyao.pickVideo({ max_seconds: bad })), 'INVALID');
   assert.strictEqual(sent.length, 0);
@@ -672,6 +672,64 @@ test('the simulator shares an invite only from a match', async () => {
   } finally {
     server.close();
   }
+});
+
+// --- 1.9.0: audio on Batiyao's own player ---
+
+test('media.background is a capability; "audio" is a feature; neither needs an address', () => {
+  const files = readFolder(WINGBEAT);
+  const m = JSON.parse(files.find((f) => f.path === 'manifest.json').data);
+  const check = (extra) => checkBundle(withFile(files, 'manifest.json', JSON.stringify({ ...m, ...extra }))).problems;
+  const purpose = { purpose: 'Plays the lesson you picked while your screen is off.' };
+  assert.deepStrictEqual(check({ capabilities: { 'media.background': purpose } }), []);
+  assert.deepStrictEqual(check({ requires: ['audio'] }), []);
+  assert.deepStrictEqual(check({ requires: ['audio', 'media.background'], capabilities: { 'media.background': purpose } }), []);
+  assert.ok(check({ capabilities: { 'media.background': { version: 2, ...purpose } } }).some((p) => p.includes('"version" must be')));
+  assert.ok(check({ capabilities: { 'media.background': { ...purpose, tools: ['web_search'] } } }).some((p) => p.includes('takes no "tools"')));
+  // requires it, but never declared it: an admin has nothing to grant.
+  assert.ok(check({ requires: ['media.background'] }).some((p) => p.includes('must declare it too')));
+});
+
+test('SDK audio checks a track before asking, and needs the feature', async () => {
+  const state = { state: 'playing', track: 0, tracks: 1, title: 'Lesson one', artist: null, position_ms: 0, duration_ms: 3000, background: true };
+  const withAudio = sdkWith((m) => (m === 'getContext' ? { result: { features: ['audio', 'backgroundAudio'] } } : { result: state }));
+  const B = withAudio.Batiyao;
+  for (const [options, want] of [
+    [{}, 'INVALID'],
+    [{ src: 'http://radio.example.com/a.mp3' }, 'INVALID'],
+    [{ src: { file: '../secret.mp3' } }, 'INVALID_NAME'],
+    [{ tracks: [] }, 'INVALID'],
+    [{ tracks: new Array(101).fill({ src: 'https://radio.example.com/a.mp3' }) }, 'INVALID'],
+    [{ src: 'https://radio.example.com/a.mp3', index: 3 }, 'INVALID'],
+    [{ src: 'https://radio.example.com/a.mp3', title: 'x'.repeat(200) }, 'INVALID'],
+    [{ src: new Blob([]) }, 'INVALID'],
+  ]) {
+    assert.strictEqual(await code(B.audio.play(options)), want, JSON.stringify(Object.keys(options)));
+  }
+  assert.strictEqual(withAudio.sent.filter((x) => x.method === 'audio.play').length, 0);
+  assert.strictEqual((await B.audio.play({ src: { file: 'lesson1.mp3' }, title: 'Lesson one', background: true })).title, 'Lesson one');
+  const sent = withAudio.sent.find((x) => x.method === 'audio.play');
+  assert.strictEqual(JSON.stringify(sent.params), JSON.stringify({ tracks: [{ src: { file: 'lesson1.mp3' }, title: 'Lesson one' }], background: true }));
+  // An https track travels as { url }, so the host has one shape to read.
+  await B.audio.play({ tracks: [{ src: 'https://radio.example.com/a.mp3' }, { src: { url: 'https://radio.example.com/b.mp3' }, artist: 'Teacher' }], index: 1 });
+  const two = withAudio.sent.filter((x) => x.method === 'audio.play')[1];
+  assert.strictEqual(JSON.stringify(two.params.tracks[0].src), JSON.stringify({ url: 'https://radio.example.com/a.mp3' }));
+  assert.strictEqual(two.params.index, 1);
+  assert.strictEqual(await code(B.audio.seek(-1)), 'INVALID');
+  assert.strictEqual(await code(B.audio.seek(1.5)), 'INVALID');
+  for (const call of ['pause', 'resume', 'stop', 'next', 'previous', 'state']) assert.strictEqual((await B.audio[call]()).state, 'playing');
+  assert.strictEqual(await B.supports('audio'), true);
+  assert.strictEqual(await B.supports('backgroundAudio'), true);
+  // The 'audio.state' event reaches a listener like any other event.
+  const heard = [];
+  B.on('audio.state', (s) => heard.push(s.state));
+  withAudio.emit('audio.state', { ...state, state: 'paused' });
+  assert.deepStrictEqual(heard, ['paused']);
+  // A Batiyao without the player: nothing is sent to it.
+  const older = sdkWith((m) => (m === 'getContext' ? { result: { features: ['files'] } } : { result: {} }));
+  assert.strictEqual(await code(older.Batiyao.audio.play({ src: { file: 'lesson1.mp3' } })), 'UNKNOWN_METHOD');
+  assert.strictEqual(await code(older.Batiyao.audio.stop()), 'UNKNOWN_METHOD');
+  assert.ok(!older.sent.some((x) => x.method.startsWith('audio.')));
 });
 
 // --- 1.8.0: net.fetch ---

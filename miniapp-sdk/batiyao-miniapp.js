@@ -43,6 +43,15 @@
  *   "net.fetch" in manifest.json "capabilities" with your purpose and have
  *   permission from each source. Answers { status, status_text, url,
  *   headers } and text / json / blob / file; net.cancel(requestId) stops one.
+ * 1.9.0 (2026-10-17): audio — Batiyao plays your app's sound on its own
+ *   player (the one voice messages use), with its bar above your app. Hand it
+ *   a track or a queue: a file of yours ({ file: 'lesson1.mp3' }), a Blob, or
+ *   an https address of yours it may read. Batiyao plays the queue in order
+ *   by itself, so the sound carries on while your app is closed when
+ *   "media.background" is granted and the person allows it; without that it
+ *   stops with your app. play / pause / resume / stop / seek / next /
+ *   previous / state, and the 'audio.state' event while your app is open.
+ *   Check supports('audio') and supports('backgroundAudio').
  * 1.7.0 (2026-10-16): share({ invite: true }) — while the person is in a
  *   match, the post or chat message links into it (…/apps/<slug>?join=CODE),
  *   so whoever taps it joins. Batiyao finds the code; stories can't invite.
@@ -58,7 +67,7 @@
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.8.0';
+  var VERSION = '1.9.0';
   var pending = Object.create(null);
   var listeners = Object.create(null);
   var counter = 0;
@@ -142,7 +151,8 @@
     'getPurchases', 'consume', 'close', 'on', 'off', 'supports'];
   var LEGACY_FEATURES = ['pay', 'share'];
   // Method names that belong to one listed feature.
-  var FEATURE_OF = { 'net.fetch': 'net', 'net.cancel': 'net', 'share.video': 'shareMedia', 'share.audio': 'shareMedia', getNickname: 'nickname', 'multiplayer.invite': 'invite', 'ai.image.generate': 'ai.image', 'ai.audio.generate': 'ai.audio', 'ai.ask': 'ai.assistant' };
+  var FEATURE_OF = { 'net.fetch': 'net', 'net.cancel': 'net', 'share.video': 'shareMedia', 'share.audio': 'shareMedia', getNickname: 'nickname', 'multiplayer.invite': 'invite', 'ai.image.generate': 'ai.image', 'ai.audio.generate': 'ai.audio', 'ai.ask': 'ai.assistant',
+    'audio.play': 'audio', 'audio.pause': 'audio', 'audio.resume': 'audio', 'audio.stop': 'audio', 'audio.seek': 'audio', 'audio.next': 'audio', 'audio.previous': 'audio', 'audio.state': 'audio' };
   var AI_CAPABILITIES = ['ai.image', 'ai.audio', 'ai.assistant'];
   var IMAGE_QUALITY = ['fast', 'balanced', 'best'];
   var AUDIO_SECONDS = { music: [8, 15, 30], sound: [3, 6, 12] };
@@ -284,6 +294,54 @@
     if (o.timeout_ms != null) {
       if (!isWhole(o.timeout_ms) || o.timeout_ms < 1000 || o.timeout_ms > 600000) throw makeError('INVALID', 'timeout_ms is 1000 to 600000.');
       params.timeout_ms = o.timeout_ms;
+    }
+    return params;
+  }
+
+  // audio (1.9.0): what Batiyao's player accepts, checked here first.
+  var AUDIO_MAX_TRACKS = 100;
+
+  function checkAudioSrc(src) {
+    if (isBlob(src)) {
+      if (src.size === 0) throw makeError('INVALID', 'That sound is empty.');
+      if (src.size > FILE_MAX_BYTES) throw makeError('FILE_TOO_LARGE', 'A sound is at most 50 MB.');
+      return src;
+    }
+    if (isPlainObject(src) && typeof src.file === 'string') {
+      var e = checkFileName(src.file);
+      if (e) throw e;
+      return { file: src.file };
+    }
+    var url = typeof src === 'string' ? src : isPlainObject(src) && typeof src.url === 'string' ? src.url : null;
+    if (!url || url.length > 2048 || !/^https:\/\/[^\s/?#]+/i.test(url)) {
+      throw makeError('INVALID', 'A track is { file: name }, a Blob, or an https address on your approved addresses.');
+    }
+    return { url: url };
+  }
+
+  // checkAudioPlay returns the params to send, or throws.
+  function checkAudioPlay(options) {
+    var o = options || {};
+    var given = Array.isArray(o.tracks) ? o.tracks : [{ src: o.src, title: o.title, artist: o.artist }];
+    if (!given.length) throw makeError('INVALID', 'play() takes a track, or tracks.');
+    if (given.length > AUDIO_MAX_TRACKS) throw makeError('INVALID', 'At most ' + AUDIO_MAX_TRACKS + ' tracks at a time.');
+    var tracks = [];
+    for (var i = 0; i < given.length; i++) {
+      var t = given[i];
+      if (!isPlainObject(t)) throw makeError('INVALID', 'Each track is { src, title }.');
+      var e = checkText('title', t.title, 1, 120, t.title == null);
+      if (e) throw e;
+      e = checkText('artist', t.artist, 1, 120, t.artist == null);
+      if (e) throw e;
+      var one = { src: checkAudioSrc(t.src) };
+      if (t.title != null) one.title = t.title;
+      if (t.artist != null) one.artist = t.artist;
+      tracks.push(one);
+    }
+    var params = { tracks: tracks, background: !!o.background };
+    if (o.index != null) {
+      if (!isWhole(o.index) || o.index < 0 || o.index >= tracks.length) throw makeError('INVALID', 'index is a track in the list.');
+      params.index = o.index;
     }
     return params;
   }
@@ -797,6 +855,74 @@
     },
 
     /**
+     * Sound, played by Batiyao on its own player — the one voice messages
+     * use — with its bar above your app. Your app hands over tracks and
+     * Batiyao plays them: it never gets the sound itself, so the person can
+     * always see what is playing and stop it.
+     *
+     * A track's `src` is one of your files ({ file: 'lesson1.mp3' }, saved
+     * with Batiyao.files), a Blob your app made, or an https address on your
+     * approved addresses. Batiyao plays a queue in order by itself.
+     *
+     * With `background: true` the sound carries on when the person leaves
+     * Batiyao or locks the screen — but only when a Batiyao admin granted
+     * your app "media.background" (declare it in manifest.json
+     * "capabilities") and the person said yes on Batiyao's sheet. Without
+     * both, the sound stops when your app does. Check supports('audio') and
+     * supports('backgroundAudio').
+     *
+     * Every call resolves the same state, and so does the 'audio.state'
+     * event while your app is open: { state: 'playing' | 'paused' |
+     * 'loading' | 'stopped', track, tracks, title, artist, position_ms,
+     * duration_ms, background }. It is only ever your app's own sound;
+     * anything else playing on the phone reads { state: 'stopped' }.
+     */
+    audio: {
+      /**
+       * play({ src, title, artist, background }) or play({ tracks: [{ src,
+       * title, artist }], index, background }). Call it from a tap.
+       */
+      play: function (options) {
+        var params;
+        try {
+          params = checkAudioPlay(options);
+        } catch (e) {
+          return Promise.reject(e);
+        }
+        return withFeature('audio', 'audio.play', function () { return send('audio.play', params, 60000); });
+      },
+      /** Pause what is playing. */
+      pause: function () {
+        return withFeature('audio', 'audio.pause', function () { return send('audio.pause', {}, 20000); });
+      },
+      /** Carry on. Call it from a tap. */
+      resume: function () {
+        return withFeature('audio', 'audio.resume', function () { return send('audio.resume', {}, 20000); });
+      },
+      /** Stop, and let the queue go. */
+      stop: function () {
+        return withFeature('audio', 'audio.stop', function () { return send('audio.stop', {}, 20000); });
+      },
+      /** Jump to a place in the track, in milliseconds. */
+      seek: function (positionMs) {
+        if (!isWhole(positionMs) || positionMs < 0) return Promise.reject(makeError('INVALID', 'seek() takes a whole number of milliseconds.'));
+        return withFeature('audio', 'audio.seek', function () { return send('audio.seek', { position_ms: positionMs }, 20000); });
+      },
+      /** The next track of the queue (the last one stays put). */
+      next: function () {
+        return withFeature('audio', 'audio.next', function () { return send('audio.next', {}, 60000); });
+      },
+      /** The one before (the first goes back to its start). */
+      previous: function () {
+        return withFeature('audio', 'audio.previous', function () { return send('audio.previous', {}, 60000); });
+      },
+      /** What is playing now, even after your app was reopened from the bar. */
+      state: function () {
+        return withFeature('audio', 'audio.state', function () { return send('audio.state', {}, 20000); });
+      }
+    },
+
+    /**
      * Real-time matches of 2-8 players, relayed by Batiyao. Only for apps a
      * Batiyao admin has allowed; check supports('multiplayer'). Players are
      * { id, nickname }; Batiyao asks for a nickname before the first match.
@@ -896,7 +1022,8 @@
      * Events from Batiyao: 'theme' ({ theme }), 'visibility' ({ visible }),
      * 'nickname' ({ nickname }: the person changed it from Batiyao's menu),
      * 'link' ({ join }: the person followed an invite link to your app while
-     * it was open).
+     * it was open), 'audio.state' (the player's state changed — the person
+     * paused, a track ended, the queue moved on).
      * Multiplayer events arrive as 'mp.joined' etc.; multiplayer.on() is the
      * same thing without the prefix.
      */
