@@ -287,6 +287,30 @@ The rules that shape the code:
   `NET_PRIVATE_ADDRESS`, `NET_FAILED`, `AUDIO_UNAVAILABLE`, `BUSY`,
   `NEEDS_TAP`. The simulator stands in for Batiyao's player, bar and sheet
   included. Details: <https://developer.batiyao.com/miniapps.md> section 10.5.
+- **Show a YouTube video with `Batiyao.video.play`** (SDK 1.10.0): list
+  YouTube among your addresses — `"network": [{"url":
+  "https://www.youtube.com", "purpose": "Plays the lesson videos."}]` — and
+  that's the whole permission (it is one of your two addresses). Your app
+  never frames YouTube; **Batiyao's own player** shows the video over your
+  app and tells you how far the person watched.
+
+  ```js
+  if (await Batiyao.supports('youtube')) {
+    lessonButton.onclick = async () => {      // from a tap
+      const r = await Batiyao.video.play({ youtube: 'https://youtu.be/VIDEO_ID', start: 30 });
+      if (r.ended || r.watched_ms > 0.9 * r.duration_ms) unlockQuiz();
+    };
+    Batiyao.on('video.state', showProgress);  // { state, position_ms, duration_ms, watched_ms }
+  }
+  ```
+
+  `watched_ms` counts only time that played (skipping ahead doesn't add to
+  it); the player closes itself when the video ends. Errors: `INVALID`,
+  `NOT_DECLARED`, `VIDEO_UNAVAILABLE` (removed, private, embedding off, or a
+  call), `BUSY`, `NEEDS_TAP`. Phone apps get it once they ship app §110;
+  until then `supports('youtube')` is false there. The simulator shows the
+  same player. Details: <https://developer.batiyao.com/miniapps.md> section
+  13.2.
 - **Read a source that sends no CORS headers with `Batiyao.net.fetch`**
   (SDK 1.8.0) — a media source or feed on one of your approved addresses
   whose answer your `fetch()` can't read. **Phone apps only:** the Batiyao
