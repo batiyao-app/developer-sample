@@ -111,7 +111,7 @@ const code = (p) => p.then(() => 'resolved', (e) => e.code);
 
 test('pickImage and pickVideo check their options before asking Batiyao', async () => {
   const { Batiyao, sent } = sdkWith(() => ({ result: { status: 'cancelled' } }));
-  assert.strictEqual(Batiyao.version, '1.9.0');
+  assert.strictEqual(Batiyao.version, '1.10.0');
   for (const bad of [10, 5000, 1.5, '512']) assert.strictEqual(await code(Batiyao.pickImage({ max_size: bad })), 'INVALID');
   for (const bad of [0, 601, 'x', Infinity]) assert.strictEqual(await code(Batiyao.pickVideo({ max_seconds: bad })), 'INVALID');
   assert.strictEqual(sent.length, 0);
@@ -879,4 +879,33 @@ test('the simulator lets net.fetch through only when declared and approved', asy
   } finally {
     server.close();
   }
+});
+
+test('YouTube: an approved YouTube address is the whole permission, and video.play takes ids or addresses', async () => {
+  const rules = require('../lib/miniapp-rules');
+  for (const o of ['https://www.youtube.com', 'https://youtu.be', 'https://*.youtube.com', 'https://www.youtube-nocookie.com']) assert.ok(rules.isYouTubeOrigin(o), o);
+  for (const o of ['https://youtube.com:8443', 'https://notyoutube.com', 'https://music.youtube.com', 'https://api.example.com']) assert.ok(!rules.isYouTubeOrigin(o), o);
+  const files = readFolder(WINGBEAT);
+  const m = JSON.parse(files.find((f) => f.path === 'manifest.json').data);
+  const check = (net, requires) => checkBundle(withFile(files, 'manifest.json', JSON.stringify({ ...m, network: net, requires }))).problems;
+  assert.deepStrictEqual(check([{ url: 'https://www.youtube.com', purpose: 'Plays the lesson videos.' }], ['youtube']), []);
+  assert.ok(check([{ url: 'https://api.example.com', purpose: 'Saves your high scores.' }], ['youtube']).some((p) => p.includes('"requires" has "youtube"')));
+
+  const { Batiyao, sent } = sdkWith((method) => (method === 'getContext' ? { result: { features: ['youtube'] } } : { result: { ended: true, position_ms: 1, duration_ms: 1, watched_ms: 1 } }));
+  for (const bad of [undefined, 'short', 'https://vimeo.com/123456', 'https://www.youtube.com/watch?v=tooshort']) assert.strictEqual(await code(Batiyao.video.play({ youtube: bad })), 'INVALID');
+  assert.strictEqual(await code(Batiyao.video.play({ youtube: 'dQw4w9WgXcQ', start: 10, end: 5 })), 'INVALID');
+  assert.strictEqual(await code(Batiyao.video.play({ youtube: 'dQw4w9WgXcQ', start: 1.5 })), 'INVALID');
+  assert.strictEqual(sent.length, 0);
+  for (const ok of ['dQw4w9WgXcQ', 'https://youtu.be/dQw4w9WgXcQ?t=42', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s',
+    'https://m.youtube.com/shorts/dQw4w9WgXcQ', 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ']) {
+    assert.strictEqual(await code(Batiyao.video.play({ youtube: ok })), 'resolved', ok);
+  }
+  const plays = sent.filter((x) => x.method === 'video.play').map((x) => JSON.stringify(x.params));
+  assert.deepStrictEqual(plays, ['{"youtube":"dQw4w9WgXcQ"}', '{"youtube":"dQw4w9WgXcQ","start":42}', '{"youtube":"dQw4w9WgXcQ","start":42}',
+    '{"youtube":"dQw4w9WgXcQ"}', '{"youtube":"dQw4w9WgXcQ"}']);
+  assert.strictEqual(await Batiyao.supports('video.play'), true);
+
+  const without = sdkWith(() => ({ result: { features: ['pay'] } })).Batiyao;
+  assert.strictEqual(await code(without.video.play({ youtube: 'dQw4w9WgXcQ' })), 'UNKNOWN_METHOD');
+  assert.strictEqual(await without.supports('youtube'), false);
 });

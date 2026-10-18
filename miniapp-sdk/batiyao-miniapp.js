@@ -52,6 +52,14 @@
  *   stops with your app. play / pause / resume / stop / seek / next /
  *   previous / state, and the 'audio.state' event while your app is open.
  *   Check supports('audio') and supports('backgroundAudio').
+ * 1.10.0 (2026-10-18): video.play({ youtube }) — Batiyao shows a YouTube
+ *   video on its own player, over your app, for apps with YouTube
+ *   (https://www.youtube.com) approved in manifest.json "network". It takes
+ *   one of your two addresses; there is nothing else to ask for. Your app
+ *   never frames YouTube itself (its sandbox can't). Resolves when the person
+ *   closes the player or the video ends: { ended, position_ms, duration_ms,
+ *   watched_ms }; the 'video.state' event follows it while it plays. Check
+ *   supports('youtube').
  * 1.7.0 (2026-10-16): share({ invite: true }) — while the person is in a
  *   match, the post or chat message links into it (…/apps/<slug>?join=CODE),
  *   so whoever taps it joins. Batiyao finds the code; stories can't invite.
@@ -67,7 +75,7 @@
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.9.0';
+  var VERSION = '1.10.0';
   var pending = Object.create(null);
   var listeners = Object.create(null);
   var counter = 0;
@@ -152,7 +160,8 @@
   var LEGACY_FEATURES = ['pay', 'share'];
   // Method names that belong to one listed feature.
   var FEATURE_OF = { 'net.fetch': 'net', 'net.cancel': 'net', 'share.video': 'shareMedia', 'share.audio': 'shareMedia', getNickname: 'nickname', 'multiplayer.invite': 'invite', 'ai.image.generate': 'ai.image', 'ai.audio.generate': 'ai.audio', 'ai.ask': 'ai.assistant',
-    'audio.play': 'audio', 'audio.pause': 'audio', 'audio.resume': 'audio', 'audio.stop': 'audio', 'audio.seek': 'audio', 'audio.next': 'audio', 'audio.previous': 'audio', 'audio.state': 'audio' };
+    'audio.play': 'audio', 'audio.pause': 'audio', 'audio.resume': 'audio', 'audio.stop': 'audio', 'audio.seek': 'audio', 'audio.next': 'audio', 'audio.previous': 'audio', 'audio.state': 'audio',
+    'video.play': 'youtube' };
   var AI_CAPABILITIES = ['ai.image', 'ai.audio', 'ai.assistant'];
   var IMAGE_QUALITY = ['fast', 'balanced', 'best'];
   var AUDIO_SECONDS = { music: [8, 15, 30], sound: [3, 6, 12] };
@@ -317,6 +326,45 @@
       throw makeError('INVALID', 'A track is { file: name }, a Blob, or an https address on your approved addresses.');
     }
     return { url: url };
+  }
+
+  // video (1.10.0): a YouTube id, or the id out of a YouTube address.
+  var YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+  var YOUTUBE_HOST_RE = /^(?:www\.|m\.)?(?:youtube\.com|youtube-nocookie\.com)$/i;
+
+  function youtubeId(v) {
+    if (typeof v !== 'string') return null;
+    if (YOUTUBE_ID_RE.test(v)) return v;
+    var m = /^https?:\/\/([^\/?#]+)(\/[^?#]*)?(\?[^#]*)?/i.exec(v);
+    if (!m) return null;
+    var host = m[1].toLowerCase(), path = m[2] || '', query = m[3] || '';
+    var id = null;
+    if (host === 'youtu.be') id = path.split('/')[1];
+    else if (YOUTUBE_HOST_RE.test(host)) {
+      var parts = path.split('/');
+      if (parts[1] === 'watch') {
+        var q = /[?&]v=([^&]+)/.exec(query);
+        id = q && q[1];
+      } else if (['embed', 'shorts', 'live', 'v'].indexOf(parts[1]) >= 0) id = parts[2];
+    }
+    return id && YOUTUBE_ID_RE.test(id) ? id : null;
+  }
+
+  function checkVideoPlay(options) {
+    var o = options || {};
+    var id = youtubeId(o.youtube);
+    if (!id) throw makeError('INVALID', 'video.play() takes { youtube: a video id or a YouTube address }.');
+    var params = { youtube: id };
+    var t = typeof o.youtube === 'string' && /[?&]t=(\d+)s?(?:&|$)/.exec(o.youtube);
+    if (o.start == null && t) params.start = parseInt(t[1], 10);
+    for (var k = 0, keys = ['start', 'end']; k < keys.length; k++) {
+      var v = o[keys[k]];
+      if (v == null) continue;
+      if (!isWhole(v) || v < 0 || v > 86400) throw makeError('INVALID', keys[k] + ' is whole seconds, 0 to 86400.');
+      params[keys[k]] = v;
+    }
+    if (params.start != null && params.end != null && params.end <= params.start) throw makeError('INVALID', 'end comes after start.');
+    return params;
   }
 
   // checkAudioPlay returns the params to send, or throws.
@@ -923,6 +971,40 @@
     },
 
     /**
+     * YouTube videos on Batiyao's own player (1.10.0). Only for apps with
+     * YouTube (https://www.youtube.com, youtu.be or https://*.youtube.com)
+     * approved in manifest.json "network" — it is one of your two addresses.
+     * Check supports('youtube'): it is false elsewhere, and on a Batiyao too
+     * old to have it.
+     *
+     * Batiyao shows the video over your app and closes it when it ends (so
+     * YouTube's end screen never offers other videos). Your app gets only
+     * how far the person watched:
+     *   { ended, position_ms, duration_ms, watched_ms }
+     * watched_ms counts time that actually played, so skipping ahead doesn't
+     * add to it. While it plays the 'video.state' event carries { state:
+     * 'loading' | 'playing' | 'paused' | 'ended', position_ms, duration_ms,
+     * watched_ms }. Rejects VIDEO_UNAVAILABLE when YouTube won't play it here
+     * (removed, private, or its owner doesn't allow embedding) or Batiyao is
+     * on a call.
+     */
+    video: {
+      /**
+       * play({ youtube: 'dQw4w9WgXcQ' | 'https://youtu.be/…', start, end }):
+       * start and end in whole seconds. Call it from a tap.
+       */
+      play: function (options) {
+        var params;
+        try {
+          params = checkVideoPlay(options);
+        } catch (e) {
+          return Promise.reject(e);
+        }
+        return withFeature('youtube', 'video.play', function () { return send('video.play', params, 0); });
+      }
+    },
+
+    /**
      * Real-time matches of 2-8 players, relayed by Batiyao. Only for apps a
      * Batiyao admin has allowed; check supports('multiplayer'). Players are
      * { id, nickname }; Batiyao asks for a nickname before the first match.
@@ -1023,7 +1105,8 @@
      * 'nickname' ({ nickname }: the person changed it from Batiyao's menu),
      * 'link' ({ join }: the person followed an invite link to your app while
      * it was open), 'audio.state' (the player's state changed — the person
-     * paused, a track ended, the queue moved on).
+     * paused, a track ended, the queue moved on), 'video.state' (the
+     * YouTube video Batiyao is showing played, paused or ended).
      * Multiplayer events arrive as 'mp.joined' etc.; multiplayer.on() is the
      * same thing without the prefix.
      */

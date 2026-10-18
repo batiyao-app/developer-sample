@@ -179,6 +179,11 @@ const HOST_PAGE = (manifest) => `<!doctype html>
     <p class="note">Batiyao can go on playing this app's sound after you leave Batiyao or lock the screen. You can stop it from the bar, the notification or the lock screen, and switch it off in the app's menu.</p>
     <div class="row"><button id="bg-no">Not now</button><button id="bg-yes" class="pay">Keep playing</button></div>
   </div></div>
+  <div id="video-sheet" class="sheetlike" style="background:rgba(0,0,0,.92)"><div style="width:min(960px,96vw)">
+    <p style="color:#fff;display:flex;justify-content:space-between;align-items:center;margin:0 0 8px"><span><b>YouTube video</b><br><small>Batiyao's own player, over your app (video.play)</small></span><button id="vd-close">Close</button></p>
+    <div style="aspect-ratio:16/9;background:#000"><iframe id="vd-frame" style="width:100%;height:100%;border:0" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-presentation"></iframe></div>
+    <p id="vd-problem" style="color:#fca5a5;display:none"></p>
+  </div></div>
   <div id="mp-sheet" class="sheetlike"><div class="card">
     <p><b>Playing online</b></p>
     <p class="note">A guardian needs to allow playing online in mini apps for this account. (Simulated: your app will hear "unavailable".)</p>
@@ -234,10 +239,15 @@ const aiCaps = () => Object.fromEntries(Object.entries(DECLARED).map(([n, c]) =>
 // admin review. The person's own "Keep playing" is asked for separately,
 // the first time the app plays with background: true.
 const bgGranted = () => !!DECLARED['media.background'] && !CAPS_DECLINED.has('media.background');
+// YouTube (1.10.0): an approved address that is YouTube turns video.play on.
+const YT_HOSTS = ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be', 'youtube-nocookie.com', 'www.youtube-nocookie.com'];
+const isYouTube = (o) => { const h = String(o).replace(/^https:\\/\\//, ''); return h !== o && !h.includes(':') && YT_HOSTS.includes(h.replace(/^\\*\\./, '')); };
+const youtubeOn = () => NET_OK.some(isYouTube);
 const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nickname', 'network', 'files', 'shareMedia', 'audio'].concat(mpMode() === 'off' ? [] : ['multiplayer', 'invite', 'shareInvite'])
   .concat(aiMode() === 'unavailable' ? [] : Object.keys(DECLARED).filter((n) => n.startsWith('ai.') && !CAPS_DECLINED.has(n)))
   .concat(netOn() ? ['net'] : [])
-  .concat(bgGranted() ? ['backgroundAudio'] : []);
+  .concat(bgGranted() ? ['backgroundAudio'] : [])
+  .concat(youtubeOn() ? ['youtube'] : []);
 let aiRunning = null;
 let nicking = null;
 const KEYRE = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -538,7 +548,7 @@ document.getElementById('pk-input').onchange = async (e) => {
 };
 document.getElementById('sh-cancel').onclick = () => endShare('cancel');
 // --- nicknames, the shared store, multiplayer (state is in the simulator's Node process) ---
-const busy = () => !!(paying || sharing || picking || nicking || inviting || bgAsking);
+const busy = () => !!(paying || sharing || picking || nicking || inviting || bgAsking || watching);
 let NET_OK = [];
 const tapped = () => !navigator.userActivation || navigator.userActivation.isActive;
 // The simulated admin review: one Approve / Decline per declared address
@@ -1000,8 +1010,67 @@ const NET = {
     reply(m.id, {});
   },
 };
+// video.play (1.10.0): the same player and the same answer as Batiyao's.
+let watching = null;
+const YT = 'https://www.youtube-nocookie.com';
+const vdFrame = document.getElementById('vd-frame');
+function endVideo(error) {
+  const w = watching; if (!w) return;
+  watching = null;
+  document.getElementById('video-sheet').style.display = 'none';
+  vdFrame.src = 'about:blank';
+  if (error) return reply(w.id, null, error);
+  reply(w.id, { ended: w.st.state === 'ended', position_ms: w.st.position_ms, duration_ms: w.st.duration_ms, watched_ms: w.st.watched_ms });
+}
+document.getElementById('vd-close').onclick = () => endVideo(watching && watching.problem ? { code: 'VIDEO_UNAVAILABLE', message: watching.problem } : null);
+window.addEventListener('message', (e) => {
+  if (!watching || e.origin !== YT || e.source !== vdFrame.contentWindow || typeof e.data !== 'string') return;
+  let d; try { d = JSON.parse(e.data); } catch (err) { return; }
+  const send = (func, args) => vdFrame.contentWindow.postMessage(JSON.stringify({ event: 'command', func, args: args || [], id: 1, channel: 'widget' }), YT);
+  if (d.event === 'onReady') { watching.ready = true; send('addEventListener', ['onStateChange']); send('addEventListener', ['onError']); return; }
+  if (d.event === 'onError') {
+    watching.problem = [101, 150].includes(Number(d.info)) ? 'The video’s owner doesn’t allow it to be played outside YouTube.' : 'YouTube couldn’t play this video (' + d.info + ').';
+    document.getElementById('vd-problem').textContent = watching.problem + ' Close the player to see VIDEO_UNAVAILABLE.';
+    document.getElementById('vd-problem').style.display = '';
+    return;
+  }
+  const info = d.event === 'infoDelivery' || d.event === 'initialDelivery' ? d.info : d.event === 'onStateChange' ? { playerState: d.info } : null;
+  if (!info) return;
+  const st = Object.assign({}, watching.st);
+  if (typeof info.currentTime === 'number') {
+    const at = Math.max(0, Math.round(info.currentTime * 1000)), step = at - st.position_ms;
+    if (st.state === 'playing' && step > 0 && step <= 3000) st.watched_ms += step;
+    st.position_ms = at;
+  }
+  if (info.duration > 0) st.duration_ms = Math.round(info.duration * 1000);
+  if (info.playerState === 1) st.state = 'playing'; else if (info.playerState === 2) st.state = 'paused'; else if (info.playerState === 0) st.state = 'ended';
+  const now = Date.now();
+  if (st.state !== watching.st.state || now - watching.sentAt >= 1000) { watching.sentAt = now; event('video.state', st); }
+  watching.st = st;
+  if (st.state === 'ended') endVideo();
+});
+const VIDEO = {
+  'video.play': async (m, p) => {
+    if (!youtubeOn()) return reply(m.id, null, { code: 'NOT_DECLARED', message: 'Batiyao plays YouTube videos only for apps with YouTube (https://www.youtube.com) approved in "network".' });
+    if (typeof p.youtube !== 'string' || !/^[A-Za-z0-9_-]{11}$/.test(p.youtube)) return reply(m.id, null, { code: 'INVALID', message: 'video.play() takes a YouTube video id.' });
+    const whole = (n) => Number.isInteger(n) && n >= 0 && n <= 86400;
+    if ((p.start != null && !whole(p.start)) || (p.end != null && !whole(p.end))) return reply(m.id, null, { code: 'INVALID', message: 'start and end are whole seconds.' });
+    if (p.start != null && p.end != null && p.end <= p.start) return reply(m.id, null, { code: 'INVALID', message: 'end comes after start.' });
+    if (busy()) return reply(m.id, null, { code: 'BUSY', message: 'Batiyao is already showing a sheet.' });
+    if (!tapped()) return reply(m.id, null, { code: 'NEEDS_TAP', message: 'Call video.play() from a tap or click.' });
+    watching = { id: m.id, ready: false, sentAt: 0, st: { state: 'loading', position_ms: 0, duration_ms: null, watched_ms: 0 } };
+    const q = new URLSearchParams({ enablejsapi: '1', origin: location.origin, rel: '0', playsinline: '1', autoplay: '1', iv_load_policy: '3' });
+    if (p.start) q.set('start', String(p.start));
+    if (p.end) q.set('end', String(p.end));
+    document.getElementById('vd-problem').style.display = 'none';
+    vdFrame.onload = () => { let n = 0; const hi = () => { if (!watching || watching.ready || n++ > 40) return; vdFrame.contentWindow.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), YT); setTimeout(hi, 250); }; hi(); };
+    vdFrame.src = YT + '/embed/' + p.youtube + '?' + q.toString();
+    document.getElementById('video-sheet').style.display = 'flex';
+  },
+};
 const FILES = {
   ...NET,
+  ...VIDEO,
   ...AUDIO,
   'files.save': async (m, p) => {
     reply(m.id, Object.assign({ saved: true }, await keepFile(p.name, p.file)));
