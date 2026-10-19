@@ -22,7 +22,11 @@
 // every browser tab is its own player and they all share one store and one
 // set of matches, like people on Batiyao. Open two tabs to play against
 // yourself. A tab opened with /?age=minor is a child: it chooses a nickname
-// from suggestions only, and plays only with other child tabs. The page's
+// from suggestions only, and plays only with other child tabs. One opened
+// with /?age=minor&approved=1 is a child whose guardian also lets them play
+// with adults they approved: here every adult tab counts as approved, so it
+// may join an adult tab's match by code (and an adult its match), and such a
+// match is private and never listed, as on Batiyao. The page's
 // switch (or /?mp=off, /?mp=ask_guardian) tries multiplayer switched off for
 // the app, or a child whose guardian hasn't allowed playing online. Nothing
 // is kept when the simulator stops.
@@ -221,9 +225,10 @@ const SLUG = ${JSON.stringify(slugOf(manifest))};
 if (QS.get('pick') === 'unavailable') document.getElementById('pick-unavailable').checked = true;
 if (['off', 'ask_guardian'].includes(QS.get('mp'))) document.getElementById('mp-mode').value = QS.get('mp');
 const MINOR = QS.get('age') === 'minor';
+const APPROVED = MINOR && QS.get('approved') === '1';
 // Each tab is its own player (a duplicated tab keeps its id: the same person twice).
 const PLAYER = sessionStorage.getItem('sim:player') || (() => { const id = 'sim-' + Math.random().toString(36).slice(2, 8); sessionStorage.setItem('sim:player', id); return id; })();
-document.getElementById('who').textContent = 'You are ' + PLAYER + (MINOR ? ' (a child, 13-15)' : ' (an adult)');
+document.getElementById('who').textContent = 'You are ' + PLAYER + (MINOR ? ' (a child, 13-15' + (APPROVED ? ', may play with approved adults)' : ')') : ' (an adult)');
 const mpMode = () => document.getElementById('mp-mode').value;
 if (['needs_download', 'unavailable'].includes(QS.get('ai'))) document.getElementById('ai-mode').value = QS.get('ai');
 const aiMode = () => document.getElementById('ai-mode').value;
@@ -644,7 +649,7 @@ function ensureConn() {
   if (es) return Promise.resolve();
   CONN = 'c' + Math.random().toString(36).slice(2, 10);
   return new Promise((resolve, reject) => {
-    es = new EventSource('/sim/mp/events?conn=' + CONN + '&player=' + encodeURIComponent(PLAYER) + '&minor=' + (MINOR ? 1 : 0));
+    es = new EventSource('/sim/mp/events?conn=' + CONN + '&player=' + encodeURIComponent(PLAYER) + '&minor=' + (MINOR ? 1 : 0) + '&approved=' + (APPROVED ? 1 : 0));
     es.onopen = () => resolve();
     es.onmessage = (e) => {
       const ev = JSON.parse(e.data);
@@ -1352,7 +1357,8 @@ function simEvents(sim, url, req, res) {
   if (!id || sim.conns.has(id)) { res.writeHead(400); return res.end(); }
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
   res.write(': connected\n\n');
-  const conn = { id, player, space: url.searchParams.get('minor') === '1' ? 'minor-13-15' : 'adult', res, match: null, seatId: null,
+  const minor = url.searchParams.get('minor') === '1';
+  const conn = { id, player, space: minor ? 'minor-13-15' : 'adult', approved: minor && url.searchParams.get('approved') === '1', res, match: null, seatId: null,
     tokens: MP.burst, at: Date.now(), windowStart: Date.now(), windowCount: 0 };
   sim.conns.set(id, conn);
   const ping = setInterval(() => res.write(': ping\n\n'), 25000);
@@ -1368,6 +1374,12 @@ function emit(conn, type, data) {
 }
 
 const matchPlayers = (sim, m) => m.conns.map((c) => playerView(sim, c.seatId));
+// Batiyao asks user-service whether everyone may play together. Here: a
+// child and an adult only when every child is an approved=1 tab.
+function mayPlayTogether(conns) {
+  const kids = conns.filter((c) => c.space !== 'adult');
+  return !(kids.length && kids.length < conns.length && kids.some((c) => !c.approved));
+}
 function matchView(sim, m, me) {
   return { id: m.id, code: m.code, max_players: m.max, public: m.public, meta: m.meta, host: m.host.seatId, me: me.seatId, players: matchPlayers(sim, m) };
 }
@@ -1390,7 +1402,7 @@ function mpOp(sim, conn, q) {
       if (typeof meta !== 'object' || Array.isArray(meta) || jsonBytes(meta) > MP.metaBytes) return fail('INVALID', 'meta is an object of at most 256 bytes as JSON.');
       if (sim.matches.size >= MP.matchesPerApp) return fail('RATE_LIMITED', 'This app has too many live matches. Try again soon.');
       let code;
-      do code = social.matchCode(); while ([...sim.matches.values()].some((m) => m.code === code && m.space === conn.space));
+      do code = social.matchCode(); while ([...sim.matches.values()].some((m) => m.code === code));
       const m = { id: 'm_' + require('node:crypto').randomBytes(6).toString('hex'), code, max, public: !!q.public, meta, space: conn.space,
         conns: [], host: null, created: Date.now(), lastMessage: Date.now() };
       conn.seatId = seatFor(m, conn);
@@ -1404,20 +1416,23 @@ function mpOp(sim, conn, q) {
       if (typeof q.code === 'string') {
         const code = q.code.trim().toUpperCase();
         if (!social.CODE_RE.test(code)) return fail('INVALID', 'A match code is 6 letters and digits.');
-        m = [...sim.matches.values()].find((x) => x.code === code && x.space === conn.space) || null;
+        // A code may lead to another space's match; who is in it decides.
+        m = [...sim.matches.values()].find((x) => x.code === code) || null;
       } else if (typeof q.match === 'string') {
         m = sim.matches.get(q.match) || null;
-        if (m && m.space !== conn.space) m = null;
+        if (m && (m.space !== conn.space || !m.public || m.mixed)) m = null;
       } else return fail('INVALID', 'join() needs { code } or { match }.');
-      if (!m) return fail('NO_SUCH_MATCH', 'There is no such match open to you.');
+      // Refused as if there were no match (before "full"), so nobody learns a child is in it.
+      if (!m || !mayPlayTogether([...m.conns, conn])) return fail('NO_SUCH_MATCH', 'There is no such match open to you.');
       if (m.conns.length >= m.max) return fail('MATCH_FULL', 'That match is full.');
+      if (m.conns.some((c) => c.space !== conn.space) || m.space !== conn.space) { m.mixed = true; m.public = false; }
       conn.seatId = seatFor(m, conn);
       for (const c of m.conns) emit(c, 'joined', { player: playerView(sim, conn.seatId) });
       m.conns.push(conn); conn.match = m;
       return ok({ match: matchView(sim, m, conn) });
     }
     case 'mp.list': {
-      const open = [...sim.matches.values()].filter((m) => m.public && m.space === conn.space && m.conns.length < m.max).slice(0, 50);
+      const open = [...sim.matches.values()].filter((m) => m.public && !m.mixed && m.space === conn.space && m.conns.length < m.max).slice(0, 50);
       return ok({ matches: open.map((m) => ({ id: m.id, players: matchPlayers(sim, m), max_players: m.max, meta: m.meta, host: m.host.seatId })) });
     }
     case 'mp.send': {

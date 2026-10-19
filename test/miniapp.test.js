@@ -328,6 +328,18 @@ test('the simulator keeps nicknames, a shared leaderboard and matches like Batiy
   assert.strictEqual(out.a[0].type, 'joined');
   conn('c', 'zed');
   assert.strictEqual(op({ op: 'mp.join', player: 'zed', conn: 'c', code: hosted.code }).error.code, 'MATCH_FULL');
+  // A child whose guardian approved adults (approved=1) may join an adult's
+  // match by code; it becomes private and leaves the list. Another child may not.
+  conn('d', 'uma'); conn('e', 'kay', 'minor-13-15'); conn('f', 'kim', 'minor-13-15'); conn('g', 'ola');
+  sim.conns.get('e').approved = true;
+  const family = op({ op: 'mp.host', player: 'uma', conn: 'd', max_players: 4, public: true }).result.match;
+  assert.strictEqual(op({ op: 'mp.list', player: 'ola', conn: 'g' }).result.matches.filter((m) => m.id === family.id).length, 1);
+  const kj = op({ op: 'mp.join', player: 'kay', conn: 'e', code: family.code }).result.match;
+  assert.strictEqual(kj.public, false);
+  assert.strictEqual(op({ op: 'mp.list', player: 'ola', conn: 'g' }).result.matches.filter((m) => m.id === family.id).length, 0);
+  assert.strictEqual(op({ op: 'mp.join', player: 'ola', conn: 'g', match: family.id }).error.code, 'NO_SUCH_MATCH');
+  assert.strictEqual(op({ op: 'mp.join', player: 'kim', conn: 'f', code: family.code }).error.code, 'NO_SUCH_MATCH');
+  op({ op: 'mp.leave', player: 'kay', conn: 'e' }); op({ op: 'mp.leave', player: 'uma', conn: 'd' });
   op({ op: 'mp.send', player: 'kid', conn: 'b', data: { move: 'e4' } });
   assert.deepStrictEqual(out.a.at(-1), { type: 'message', data: { from: { id: 'kid', nickname: offer.suggestions[0].nickname }, data: { move: 'e4' } } });
   assert.strictEqual(op({ op: 'mp.send', player: 'kid', conn: 'b', data: 'x'.repeat(1100) }).error.code, 'MESSAGE_TOO_LARGE');
