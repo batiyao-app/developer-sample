@@ -23,10 +23,11 @@
 // set of matches, like people on Batiyao. Open two tabs to play against
 // yourself. A tab opened with /?age=minor is a child: it chooses a nickname
 // from suggestions only, and plays only with other child tabs. One opened
-// with /?age=minor&approved=1 is a child whose guardian also lets them play
-// with adults they approved: here every adult tab counts as approved, so it
-// may join an adult tab's match by code (and an adult its match), and such a
-// match is private and never listed, as on Batiyao. The page's
+// with /?age=minor&chats=1 is a child whose guardian lets them play with
+// adults they chat with: here it counts as chatting with every adult tab, so
+// it may join an adult tab's match by code (and an adult its match), and such
+// a match is private and never listed, as on Batiyao. Anyone else gets
+// JOIN_NOT_ALLOWED with a reason (SDK 1.11.0). The page's
 // switch (or /?mp=off, /?mp=ask_guardian) tries multiplayer switched off for
 // the app, or a child whose guardian hasn't allowed playing online. Nothing
 // is kept when the simulator stops.
@@ -225,10 +226,10 @@ const SLUG = ${JSON.stringify(slugOf(manifest))};
 if (QS.get('pick') === 'unavailable') document.getElementById('pick-unavailable').checked = true;
 if (['off', 'ask_guardian'].includes(QS.get('mp'))) document.getElementById('mp-mode').value = QS.get('mp');
 const MINOR = QS.get('age') === 'minor';
-const APPROVED = MINOR && QS.get('approved') === '1';
+const CHATS = MINOR && QS.get('chats') === '1';
 // Each tab is its own player (a duplicated tab keeps its id: the same person twice).
 const PLAYER = sessionStorage.getItem('sim:player') || (() => { const id = 'sim-' + Math.random().toString(36).slice(2, 8); sessionStorage.setItem('sim:player', id); return id; })();
-document.getElementById('who').textContent = 'You are ' + PLAYER + (MINOR ? ' (a child, 13-15' + (APPROVED ? ', may play with approved adults)' : ')') : ' (an adult)');
+document.getElementById('who').textContent = 'You are ' + PLAYER + (MINOR ? ' (a child, 13-15' + (CHATS ? ', plays with adults they chat with)' : ')') : ' (an adult)');
 const mpMode = () => document.getElementById('mp-mode').value;
 if (['needs_download', 'unavailable'].includes(QS.get('ai'))) document.getElementById('ai-mode').value = QS.get('ai');
 const aiMode = () => document.getElementById('ai-mode').value;
@@ -649,7 +650,7 @@ function ensureConn() {
   if (es) return Promise.resolve();
   CONN = 'c' + Math.random().toString(36).slice(2, 10);
   return new Promise((resolve, reject) => {
-    es = new EventSource('/sim/mp/events?conn=' + CONN + '&player=' + encodeURIComponent(PLAYER) + '&minor=' + (MINOR ? 1 : 0) + '&approved=' + (APPROVED ? 1 : 0));
+    es = new EventSource('/sim/mp/events?conn=' + CONN + '&player=' + encodeURIComponent(PLAYER) + '&minor=' + (MINOR ? 1 : 0) + '&chats=' + (CHATS ? 1 : 0));
     es.onopen = () => resolve();
     es.onmessage = (e) => {
       const ev = JSON.parse(e.data);
@@ -1358,7 +1359,7 @@ function simEvents(sim, url, req, res) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
   res.write(': connected\n\n');
   const minor = url.searchParams.get('minor') === '1';
-  const conn = { id, player, space: minor ? 'minor-13-15' : 'adult', approved: minor && url.searchParams.get('approved') === '1', res, match: null, seatId: null,
+  const conn = { id, player, space: minor ? 'minor-13-15' : 'adult', chats: minor && url.searchParams.get('chats') === '1', res, match: null, seatId: null,
     tokens: MP.burst, at: Date.now(), windowStart: Date.now(), windowCount: 0 };
   sim.conns.set(id, conn);
   const ping = setInterval(() => res.write(': ping\n\n'), 25000);
@@ -1375,10 +1376,13 @@ function emit(conn, type, data) {
 
 const matchPlayers = (sim, m) => m.conns.map((c) => playerView(sim, c.seatId));
 // Batiyao asks user-service whether everyone may play together. Here: a
-// child and an adult only when every child is an approved=1 tab.
-function mayPlayTogether(conns) {
+// child and an adult only when every child is a chats=1 tab. A refusal says
+// why from where the joiner stands, as Batiyao's does.
+function joinRefusal(conns, joiner) {
   const kids = conns.filter((c) => c.space !== 'adult');
-  return !(kids.length && kids.length < conns.length && kids.some((c) => !c.approved));
+  if (!(kids.length && kids.length < conns.length && kids.some((c) => !c.chats))) return null;
+  if (joiner.space !== 'adult') return { reason: 'guardian', message: "Your guardian hasn't allowed you to play with these players." };
+  return { reason: 'not_connected', message: 'A player in this match only plays online with people they chat with on Batiyao.' };
 }
 function matchView(sim, m, me) {
   return { id: m.id, code: m.code, max_players: m.max, public: m.public, meta: m.meta, host: m.host.seatId, me: me.seatId, players: matchPlayers(sim, m) };
@@ -1423,7 +1427,9 @@ function mpOp(sim, conn, q) {
         if (m && (m.space !== conn.space || !m.public || m.mixed)) m = null;
       } else return fail('INVALID', 'join() needs { code } or { match }.');
       // Refused as if there were no match (before "full"), so nobody learns a child is in it.
-      if (!m || !mayPlayTogether([...m.conns, conn])) return fail('NO_SUCH_MATCH', 'There is no such match open to you.');
+      if (!m) return fail('NO_SUCH_MATCH', 'There is no such match open to you.');
+      const refusal = joinRefusal([...m.conns, conn], conn);
+      if (refusal) return { error: { code: 'JOIN_NOT_ALLOWED', message: refusal.message, reason: refusal.reason } };
       if (m.conns.length >= m.max) return fail('MATCH_FULL', 'That match is full.');
       if (m.conns.some((c) => c.space !== conn.space) || m.space !== conn.space) { m.mixed = true; m.public = false; }
       conn.seatId = seatFor(m, conn);

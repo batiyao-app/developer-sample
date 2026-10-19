@@ -164,7 +164,7 @@ from the internet. You host nothing. The full guide is at
 
 | | |
 |---|---|
-| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK (1.10.0): one file, copy it into your app. `ready`, `getContext` (with `link` when opened from an invite link), `storage`, `pay`, `share`, `pickImage`, `pickVideo`, `getNickname`, `db`, `multiplayer` (with `invite()`), `ai` (BGen pictures, BAudio sounds, Batiyao AI answers), `capability`, `supports`, `getPurchases`, `consume`, `close`. |
+| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK (1.11.0): one file, copy it into your app. `ready`, `getContext` (with `link` when opened from an invite link), `storage`, `pay`, `share`, `pickImage`, `pickVideo`, `getNickname`, `db`, `multiplayer` (with `invite()`), `ai` (BGen pictures, BAudio sounds, Batiyao AI answers), `capability`, `supports`, `getPurchases`, `consume`, `close`. |
 | [`miniapp/wingbeat/`](miniapp/wingbeat) | The sample game: saved best score, a consumable (golden feathers), a permanent purchase (night sky), and "Share my score" (a score card drawn on a canvas, offered with `share()`). Live on Batiyao — open Mini apps and play it. |
 | [`tools/miniapp-simulator.js`](tools/miniapp-simulator.js) | A stand-in for Batiyao on your machine: same sandbox, a payment sheet from your manifest, share and photo/video sheets, nicknames, a shared store and multiplayer across tabs, a log of every SDK call. |
 | [`tools/pack-miniapp.js`](tools/pack-miniapp.js) | Checks the folder against Batiyao's upload rules and zips it. |
@@ -389,9 +389,10 @@ The rules that shape the code:
 - **Multiplayer is real-time matches of 2-8, relayed by Batiyao.** Only for
   apps a Batiyao admin has allowed (ask on your app's page), and adults
   only unless the admin allows children too; then a child plays only with
-  children of their age, or with adults their guardian approved, as their
-  guardian's switches allow. Batiyao checks every join: anyone else gets
-  `NO_SUCH_MATCH`, and a match with a child and an adult is never listed. Check
+  children of their age, or with adults they have an active one-to-one chat
+  with, as their guardian's switches allow. Batiyao checks every join: anyone
+  else gets `JOIN_NOT_ALLOWED` with a `reason` (SDK 1.11.0) and a `message`
+  you can show, and a match with a child and an adult is never listed. Check
   `supports('multiplayer')`. `host({ max_players, public, meta })` and
   `join({ code })` (from a tap) resolve `{ status: 'joined', match }`,
   `'cancelled'` or `'unavailable'`; Batiyao asks for a nickname first.
@@ -429,7 +430,7 @@ The rules that shape the code:
 
   In the simulator every tab is its own player: open two to play against
   yourself. Open `/?join=CODE` to start as if from an invite link, and use
-  "Follow a link…" to send the `link` event. `/?age=minor` makes a tab a child, and `/?age=minor&approved=1` a child whose guardian approved the adult tabs; `/?mp=off` and
+  "Follow a link…" to send the `link` event. `/?age=minor` makes a tab a child, and `/?age=minor&chats=1` a child who chats with the adult tabs (anyone else gets `JOIN_NOT_ALLOWED`); `/?mp=off` and
   `/?mp=ask_guardian` (or the switch on the page) try the other answers.
 - **Credit, save, then consume.** Check `getPurchases()` at start-up and
   credit anything new before `consume()`, so nothing is lost if the app

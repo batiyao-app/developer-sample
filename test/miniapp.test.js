@@ -111,7 +111,7 @@ const code = (p) => p.then(() => 'resolved', (e) => e.code);
 
 test('pickImage and pickVideo check their options before asking Batiyao', async () => {
   const { Batiyao, sent } = sdkWith(() => ({ result: { status: 'cancelled' } }));
-  assert.strictEqual(Batiyao.version, '1.10.0');
+  assert.strictEqual(Batiyao.version, '1.11.0');
   for (const bad of [10, 5000, 1.5, '512']) assert.strictEqual(await code(Batiyao.pickImage({ max_size: bad })), 'INVALID');
   for (const bad of [0, 601, 'x', Infinity]) assert.strictEqual(await code(Batiyao.pickVideo({ max_seconds: bad })), 'INVALID');
   assert.strictEqual(sent.length, 0);
@@ -319,8 +319,10 @@ test('the simulator keeps nicknames, a shared leaderboard and matches like Batiy
   conn('a', 'ana'); conn('b', 'kid', 'minor-13-15');
   const hosted = op({ op: 'mp.host', player: 'ana', conn: 'a', max_players: 2, public: true }).result.match;
   assert.match(hosted.code, social.CODE_RE);
-  // The child tab plays only with children: an adult's match doesn't exist for it.
-  assert.strictEqual(op({ op: 'mp.join', player: 'kid', conn: 'b', code: hosted.code }).error.code, 'NO_SUCH_MATCH');
+  // The child tab plays only with children: an adult's match refuses it, saying why.
+  const kidRefused = op({ op: 'mp.join', player: 'kid', conn: 'b', code: hosted.code }).error;
+  assert.strictEqual(kidRefused.code, 'JOIN_NOT_ALLOWED');
+  assert.strictEqual(kidRefused.reason, 'guardian');
   assert.deepStrictEqual(op({ op: 'mp.list', player: 'kid', conn: 'b' }).result.matches, []);
   sim.conns.get('b').space = 'adult';
   const joined = op({ op: 'mp.join', player: 'kid', conn: 'b', code: hosted.code.toLowerCase() }).result.match;
@@ -328,17 +330,19 @@ test('the simulator keeps nicknames, a shared leaderboard and matches like Batiy
   assert.strictEqual(out.a[0].type, 'joined');
   conn('c', 'zed');
   assert.strictEqual(op({ op: 'mp.join', player: 'zed', conn: 'c', code: hosted.code }).error.code, 'MATCH_FULL');
-  // A child whose guardian approved adults (approved=1) may join an adult's
+  // A child who chats with the adults (chats=1) may join an adult's
   // match by code; it becomes private and leaves the list. Another child may not.
   conn('d', 'uma'); conn('e', 'kay', 'minor-13-15'); conn('f', 'kim', 'minor-13-15'); conn('g', 'ola');
-  sim.conns.get('e').approved = true;
+  sim.conns.get('e').chats = true;
   const family = op({ op: 'mp.host', player: 'uma', conn: 'd', max_players: 4, public: true }).result.match;
   assert.strictEqual(op({ op: 'mp.list', player: 'ola', conn: 'g' }).result.matches.filter((m) => m.id === family.id).length, 1);
   const kj = op({ op: 'mp.join', player: 'kay', conn: 'e', code: family.code }).result.match;
   assert.strictEqual(kj.public, false);
   assert.strictEqual(op({ op: 'mp.list', player: 'ola', conn: 'g' }).result.matches.filter((m) => m.id === family.id).length, 0);
   assert.strictEqual(op({ op: 'mp.join', player: 'ola', conn: 'g', match: family.id }).error.code, 'NO_SUCH_MATCH');
-  assert.strictEqual(op({ op: 'mp.join', player: 'kim', conn: 'f', code: family.code }).error.code, 'NO_SUCH_MATCH');
+  const refused = op({ op: 'mp.join', player: 'kim', conn: 'f', code: family.code }).error;
+  assert.strictEqual(refused.code, 'JOIN_NOT_ALLOWED');
+  assert.strictEqual(refused.reason, 'guardian');
   op({ op: 'mp.leave', player: 'kay', conn: 'e' }); op({ op: 'mp.leave', player: 'uma', conn: 'd' });
   op({ op: 'mp.send', player: 'kid', conn: 'b', data: { move: 'e4' } });
   assert.deepStrictEqual(out.a.at(-1), { type: 'message', data: { from: { id: 'kid', nickname: offer.suggestions[0].nickname }, data: { move: 'e4' } } });
@@ -920,4 +924,14 @@ test('YouTube: an approved YouTube address is the whole permission, and video.pl
   const without = sdkWith(() => ({ result: { features: ['pay'] } })).Batiyao;
   assert.strictEqual(await code(without.video.play({ youtube: 'dQw4w9WgXcQ' })), 'UNKNOWN_METHOD');
   assert.strictEqual(await without.supports('youtube'), false);
+});
+
+test('a refused join says why: JOIN_NOT_ALLOWED with a reason (1.11.0)', async () => {
+  const { Batiyao, sent } = sdkWith(() => ({ error: { code: 'JOIN_NOT_ALLOWED', message: 'A player in this match only plays online with people they chat with on Batiyao.', reason: 'not_connected' } }));
+  await assert.rejects(Batiyao.multiplayer.join({ code: 'ABC234' }), (e) =>
+    e.code === 'JOIN_NOT_ALLOWED' && e.reason === 'not_connected' && /chat with/.test(e.message));
+  assert.strictEqual(sent[0].method, 'mp.join');
+  // Other errors are unchanged: no reason field appears.
+  const other = sdkWith(() => ({ error: { code: 'MATCH_FULL', message: 'That match is full.' } }));
+  await assert.rejects(other.Batiyao.multiplayer.join({ code: 'ABC234' }), (e) => e.code === 'MATCH_FULL' && !('reason' in e));
 });

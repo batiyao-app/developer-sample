@@ -52,6 +52,10 @@
  *   stops with your app. play / pause / resume / stop / seek / next /
  *   previous / state, and the 'audio.state' event while your app is open.
  *   Check supports('audio') and supports('backgroundAudio').
+ * 1.11.0 (2026-10-19): a refused multiplayer.join() says why: the error has
+ *   code JOIN_NOT_ALLOWED, a message you can show as it is, and reason
+ *   (not_connected, guardian, age_group or not_allowed). Never who. A player
+ *   Batiyao takes out of a match gets 'closed' with reason 'not_allowed'.
  * 1.10.0 (2026-10-18): video.play({ youtube }) — Batiyao shows a YouTube
  *   video on its own player, over your app, for apps with YouTube
  *   (https://www.youtube.com) approved in manifest.json "network". It takes
@@ -75,15 +79,17 @@
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.10.0';
+  var VERSION = '1.11.0';
   var pending = Object.create(null);
   var listeners = Object.create(null);
   var counter = 0;
   var isFramed = global.parent && global.parent !== global;
 
-  function makeError(code, message) {
+  function makeError(code, message, reason) {
     var err = new Error(message || code);
     err.code = code;
+    // Why, in a word an app can act on (JOIN_NOT_ALLOWED, 1.11.0).
+    if (typeof reason === 'string') err.reason = reason;
     return err;
   }
 
@@ -120,7 +126,7 @@
       delete pending[data.id];
       delete progress[data.id];
       if (p.timer) clearTimeout(p.timer);
-      if (data.error) p.reject(makeError(data.error.code, data.error.message));
+      if (data.error) p.reject(makeError(data.error.code, data.error.message, data.error.reason));
       else p.resolve(data.result);
       return;
     }
