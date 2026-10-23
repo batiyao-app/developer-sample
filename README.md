@@ -233,6 +233,13 @@ The rules that shape the code:
   sends. Put `"network"` in `requires` if your app is useless offline. The
   simulator lets declared addresses through as if approved. Details:
   <https://developer.batiyao.com/miniapps.md> section 13.
+- **Where your app is offered.** Leave `"platforms"` out of the manifest
+  and your app is offered everywhere: the Android app, the iPhone app and
+  batiyao.com. To leave some out, list the others:
+  `"platforms": ["android", "web"]`. Batiyao may take an app off a platform
+  too (app store rules, usually) and tells you if it does. Test runs are on
+  the website and in the Android app; the iPhone app has none. Details:
+  <https://developer.batiyao.com/miniapps.md> section 15.2.
 - **Batiyao draws the payment sheet, not you.** Call `Batiyao.pay({ product })`
   from a tap; the price and wording come from your reviewed manifest.
 - **Batiyao draws the share sheet too.** `Batiyao.share({ image: canvas, text })`

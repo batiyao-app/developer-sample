@@ -481,6 +481,19 @@ test('network in the manifest: at most two, each with a purpose, no repeats', ()
   assert.deepStrictEqual(check(undefined, ['invite', 'multiplayer']).problems, []);
 });
 
+test('platforms: left out is everywhere; otherwise known names, at least one, no repeats', () => {
+  const files = readFolder(WINGBEAT);
+  const m = JSON.parse(files.find((f) => f.path === 'manifest.json').data);
+  const check = (platforms) => checkBundle(withFile(files, 'manifest.json', JSON.stringify({ ...m, platforms })));
+  const has = (r, s) => r.problems.some((p) => p.includes(s));
+  assert.deepStrictEqual(check(undefined).problems, []);
+  assert.deepStrictEqual(check(['android', 'web']).problems, []);
+  assert.ok(has(check([]), 'at least one'));
+  assert.ok(has(check(['iphone']), '"platforms" has "iphone"'));
+  assert.ok(has(check(['ios', 'ios']), '"ios" twice'));
+  assert.ok(has(check('ios'), 'is a list'));
+});
+
 test('only media may come from a declared address, and sockets stop being flagged', () => {
   const files = readFolder(WINGBEAT);
   const m = JSON.parse(files.find((f) => f.path === 'manifest.json').data);
