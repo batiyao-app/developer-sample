@@ -74,12 +74,23 @@
  *   sound ({ audio: Blob }, up to 10 MB and 5 minutes, optionally with an
  *   image to show it with). Batiyao re-encodes either before the person
  *   sees it. Check supports('files') and supports('shareMedia').
+ * 1.12.0 (2026-10-23): cast — a TV view of your app (Chromecast, and Apple
+ *   TV from an iPhone). Your manifest names a second page ("cast": { entry:
+ *   "tv.html", purpose }) and only that page ever reaches the TV. Say when
+ *   there is something to show with cast.setAvailable(true): Batiyao's TV
+ *   button appears, and the person taps it — your app can never start
+ *   casting. Then cast.send(data) to the TV page and on('cast.message') back,
+ *   at most 16 KB as JSON and 30 a second (CAST_LIMIT); 'cast.state' says
+ *   connected or disconnected, never which TV. Where there is no casting (the
+ *   website, an older Batiyao) setAvailable does nothing, send rejects
+ *   NOT_CASTING and state() is 'disconnected'. The TV page uses
+ *   batiyao-cast.js. Check supports('cast').
  */
 (function (global) {
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.11.0';
+  var VERSION = '1.12.0';
   var pending = Object.create(null);
   var listeners = Object.create(null);
   var counter = 0;
@@ -167,7 +178,7 @@
   // Method names that belong to one listed feature.
   var FEATURE_OF = { 'net.fetch': 'net', 'net.cancel': 'net', 'share.video': 'shareMedia', 'share.audio': 'shareMedia', getNickname: 'nickname', 'multiplayer.invite': 'invite', 'ai.image.generate': 'ai.image', 'ai.audio.generate': 'ai.audio', 'ai.ask': 'ai.assistant',
     'audio.play': 'audio', 'audio.pause': 'audio', 'audio.resume': 'audio', 'audio.stop': 'audio', 'audio.seek': 'audio', 'audio.next': 'audio', 'audio.previous': 'audio', 'audio.state': 'audio',
-    'video.play': 'youtube' };
+    'video.play': 'youtube', 'cast.setAvailable': 'cast', 'cast.send': 'cast', 'cast.state': 'cast' };
   var AI_CAPABILITIES = ['ai.image', 'ai.audio', 'ai.assistant'];
   var IMAGE_QUALITY = ['fast', 'balanced', 'best'];
   var AUDIO_SECONDS = { music: [8, 15, 30], sound: [3, 6, 12] };
@@ -398,6 +409,38 @@
       params.index = o.index;
     }
     return params;
+  }
+
+  // cast (1.12.0): the limits of a message between your app and its TV page,
+  // both ways. Batiyao enforces them too; checked here first.
+  var CAST_MAX_BYTES = 16384;
+  var CAST_PER_SECOND = 30;
+  var castTimes = [];
+
+  // Does this Batiyao cast for your app? A host that can't say (an older
+  // one, or no host at all) doesn't: cast calls are then no-ops, not errors.
+  function castFeature() {
+    return context().then(function (ctx) {
+      return !!(ctx && Array.isArray(ctx.features) && ctx.features.indexOf('cast') >= 0);
+    }, function () {
+      return false;
+    });
+  }
+
+  // checkCast throws when data can't go to the TV page as it is.
+  function checkCast(data) {
+    var n = jsonBytes(data);
+    if (n < 0) throw makeError('INVALID', 'cast.send() takes data that can be sent as JSON.');
+    if (n > CAST_MAX_BYTES) throw makeError('CAST_LIMIT', 'A message to the TV is at most 16 KB as JSON.');
+  }
+
+  // At most 30 messages in any second; true when this one may go.
+  function castSlot(times) {
+    var now = Date.now();
+    while (times.length && now - times[0] >= 1000) times.shift();
+    if (times.length >= CAST_PER_SECOND) return false;
+    times.push(now);
+    return true;
   }
 
   var CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/;
@@ -1101,6 +1144,56 @@
       }
     },
 
+    /**
+     * A TV view of your app (1.12.0): the page your manifest names in
+     * "cast" (e.g. tv.html), shown on a Chromecast or, from an iPhone, an
+     * Apple TV. Only that page reaches the TV — never your app, which may
+     * show things one person shouldn't share with the room. Show a board,
+     * scores or a replay there, not a player's hand.
+     *
+     * Batiyao's own TV button appears while your app says it has something
+     * to show (setAvailable(true)); the person taps it. Your app can never
+     * start casting. Listen to 'cast.state' ({ state: 'connected' |
+     * 'disconnected' }) — Batiyao never says which TV — and to
+     * 'cast.message' (whatever the TV page sent). A message is at most 16 KB
+     * as JSON, 30 a second (CAST_LIMIT): send the state of the game and let
+     * the TV page draw it, never frames of video.
+     *
+     * Where there is no casting (the website, which is not a Cast sender, or
+     * an older Batiyao) setAvailable() does nothing, send() rejects
+     * NOT_CASTING and state() is 'disconnected'. Check supports('cast').
+     */
+    cast: {
+      /** Whether there is something to show right now. Resolves {}. */
+      setAvailable: function (available) {
+        if (typeof available !== 'boolean') return Promise.reject(makeError('INVALID', 'setAvailable() takes true or false.'));
+        return castFeature().then(function (on) {
+          if (!on) return {};
+          return send('cast.setAvailable', { available: available }, 10000).then(function () { return {}; });
+        });
+      },
+      /**
+       * Send JSON to the TV page (it hears BatiyaoCast.on('message')).
+       * Resolves {} once Batiyao has it; rejects NOT_CASTING when no TV is
+       * connected, CAST_LIMIT past 16 KB or 30 a second.
+       */
+      send: function (data) {
+        try { checkCast(data); } catch (e) { return Promise.reject(e); }
+        return castFeature().then(function (on) {
+          if (!on) throw makeError('NOT_CASTING', 'Nothing is being shown on a TV.');
+          if (!castSlot(castTimes)) throw makeError('CAST_LIMIT', 'At most 30 messages a second to the TV.');
+          return send('cast.send', { data: data }, 10000);
+        });
+      },
+      /** Resolves { state: 'connected' | 'disconnected' }. */
+      state: function () {
+        return castFeature().then(function (on) {
+          if (!on) return { state: 'disconnected' };
+          return send('cast.state', {}, 10000);
+        });
+      }
+    },
+
     /** Close your app. */
     close: function () {
       return send('close', {}, 10000);
@@ -1112,7 +1205,9 @@
      * 'link' ({ join }: the person followed an invite link to your app while
      * it was open), 'audio.state' (the player's state changed — the person
      * paused, a track ended, the queue moved on), 'video.state' (the
-     * YouTube video Batiyao is showing played, paused or ended).
+     * YouTube video Batiyao is showing played, paused or ended),
+     * 'cast.state' ({ state }: a TV connected or went away) and
+     * 'cast.message' (what your TV page sent).
      * Multiplayer events arrive as 'mp.joined' etc.; multiplayer.on() is the
      * same thing without the prefix.
      */

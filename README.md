@@ -164,9 +164,10 @@ from the internet. You host nothing. The full guide is at
 
 | | |
 |---|---|
-| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK (1.11.0): one file, copy it into your app. `ready`, `getContext` (with `link` when opened from an invite link), `storage`, `pay`, `share`, `pickImage`, `pickVideo`, `getNickname`, `db`, `multiplayer` (with `invite()`), `ai` (BGen pictures, BAudio sounds, Batiyao AI answers), `capability`, `supports`, `getPurchases`, `consume`, `close`. |
+| [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK (1.12.0): one file, copy it into your app. `ready`, `getContext` (with `link` when opened from an invite link), `storage`, `pay`, `share`, `pickImage`, `pickVideo`, `getNickname`, `db`, `multiplayer` (with `invite()`), `ai` (BGen pictures, BAudio sounds, Batiyao AI answers), `cast` (a TV view), `capability`, `supports`, `getPurchases`, `consume`, `close`. |
+| [`miniapp-sdk/batiyao-cast.js`](miniapp-sdk/batiyao-cast.js) | The TV page's SDK (1.0.0), for an app with a TV view: `BatiyaoCast.ready`, `send`, `on('message' \| 'ended')`. |
 | [`miniapp/wingbeat/`](miniapp/wingbeat) | The sample game: saved best score, a consumable (golden feathers), a permanent purchase (night sky), and "Share my score" (a score card drawn on a canvas, offered with `share()`). Live on Batiyao — open Mini apps and play it. |
-| [`tools/miniapp-simulator.js`](tools/miniapp-simulator.js) | A stand-in for Batiyao on your machine: same sandbox, a payment sheet from your manifest, share and photo/video sheets, nicknames, a shared store and multiplayer across tabs, a log of every SDK call. |
+| [`tools/miniapp-simulator.js`](tools/miniapp-simulator.js) | A stand-in for Batiyao on your machine: same sandbox, a payment sheet from your manifest, share and photo/video sheets, nicknames, a shared store and multiplayer across tabs, a TV beside the phone, a log of every SDK call. |
 | [`tools/pack-miniapp.js`](tools/pack-miniapp.js) | Checks the folder against Batiyao's upload rules and zips it. |
 
 ```bash
@@ -240,6 +241,42 @@ The rules that shape the code:
   too (app store rules, usually) and tells you if it does. Test runs are on
   the website and in the Android app; the iPhone app has none. Details:
   <https://developer.batiyao.com/miniapps.md> section 15.2.
+- **Show something on a TV** (SDK 1.12.0): a Chromecast from either phone,
+  an Apple TV from an iPhone. Your app never goes to the TV — a **TV page**
+  of its own does, named in the manifest and reviewed with your version:
+
+  ```json
+  "cast": { "entry": "tv.html", "purpose": "Shows the board so the room can watch." }
+  ```
+
+  `entry` is an `.html` page of the bundle other than your app's `entry`,
+  and it may not lead to any other page (a TV is given only that page and
+  your other files); `orientation` is `"landscape"` if you give it, and
+  `purpose` is 10-140 characters. Offer a view the whole room shares — the
+  board, the scores, a replay — never the private parts of a game. On the
+  phone:
+
+  ```js
+  Batiyao.cast.setAvailable(true);            // Batiyao's TV button appears; the person taps it
+  Batiyao.on('cast.state', ({ state }) => {   // 'connected' | 'disconnected', never which TV
+    if (state === 'connected') Batiyao.cast.send({ board, scores });
+  });
+  Batiyao.on('cast.message', (data) => {});   // what the TV page sent
+  ```
+
+  `tv.html` includes [`batiyao-cast.js`](miniapp-sdk/batiyao-cast.js):
+  `BatiyaoCast.ready()` once it has drawn, `BatiyaoCast.on('message', fn)`,
+  `BatiyaoCast.send(data)` back, `on('ended', fn)`. It has no person, no
+  storage and no `Batiyao.*` calls. Both ways a message is at most 16 KB as
+  JSON, 30 a second (`CAST_LIMIT`); `send()` with no TV rejects
+  `NOT_CASTING`. Messages take a moment: send the game's state and let the
+  TV page draw and animate it — it is not a video of the phone. Design it
+  for 1920 x 1080 seen from across a room: big type, no taps. Your app can
+  never start casting. The website doesn't cast: there, and on an older
+  Batiyao, `supports('cast')` is false, `setAvailable()` does nothing and
+  `state()` is `'disconnected'`. In the simulator the TV pane shows your TV
+  page beside the phone, with Batiyao's TV button, a "TV connected" switch
+  and a delay (or `/?cast_delay=300`, in milliseconds).
 - **Batiyao draws the payment sheet, not you.** Call `Batiyao.pay({ product })`
   from a tap; the price and wording come from your reviewed manifest.
 - **Batiyao draws the share sheet too.** `Batiyao.share({ image: canvas, text })`
@@ -458,7 +495,8 @@ references are refused, the packer's zip, that the simulator serves the game
 sealed off and offers the picker, the SDK's option checks and
 `supports()` (including what an older Batiyao without `features` has), the
 nickname rules, the order a full shared store replaces records in, match
-codes, and the simulator's leaderboard and matches.
+codes, the simulator's leaderboard and matches, and casting: the manifest's
+`cast` rules, both SDKs' limits, and the simulator's TV pane.
 
 ## Links
 

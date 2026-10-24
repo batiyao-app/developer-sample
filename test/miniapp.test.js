@@ -111,7 +111,7 @@ const code = (p) => p.then(() => 'resolved', (e) => e.code);
 
 test('pickImage and pickVideo check their options before asking Batiyao', async () => {
   const { Batiyao, sent } = sdkWith(() => ({ result: { status: 'cancelled' } }));
-  assert.strictEqual(Batiyao.version, '1.11.0');
+  assert.strictEqual(Batiyao.version, '1.12.0');
   for (const bad of [10, 5000, 1.5, '512']) assert.strictEqual(await code(Batiyao.pickImage({ max_size: bad })), 'INVALID');
   for (const bad of [0, 601, 'x', Infinity]) assert.strictEqual(await code(Batiyao.pickVideo({ max_seconds: bad })), 'INVALID');
   assert.strictEqual(sent.length, 0);
@@ -947,4 +947,169 @@ test('a refused join says why: JOIN_NOT_ALLOWED with a reason (1.11.0)', async (
   // Other errors are unchanged: no reason field appears.
   const other = sdkWith(() => ({ error: { code: 'MATCH_FULL', message: 'That match is full.' } }));
   await assert.rejects(other.Batiyao.multiplayer.join({ code: 'ABC234' }), (e) => e.code === 'MATCH_FULL' && !('reason' in e));
+});
+
+// --- 1.12.0: casting to a TV ---
+
+const CAST = { entry: 'tv.html', purpose: 'Shows the board so the room can watch.' };
+
+test('cast in the manifest: its own landscape page, a purpose, and no way to the rest of the app', () => {
+  const files = readFolder(WINGBEAT);
+  const m = JSON.parse(files.find((f) => f.path === 'manifest.json').data);
+  const check = (cast, tv = '<p>The board</p>', tvPath = 'tv.html', requires) => {
+    let f = withFile(files, 'manifest.json', JSON.stringify({ ...m, cast, requires }));
+    if (tv !== null) f = withFile(f, tvPath, tv);
+    return checkBundle(f).problems;
+  };
+  const has = (problems, s) => problems.some((p) => p.includes(s));
+  assert.deepStrictEqual(check(CAST), []);
+  assert.deepStrictEqual(check({ ...CAST, version: 1, orientation: 'landscape' }), []);
+  assert.deepStrictEqual(check(CAST, undefined, undefined, ['cast']), []);
+  assert.ok(has(check('tv.html'), '"cast" is an object'));
+  assert.ok(has(check({ ...CAST, size: 'big' }), '"cast" has unknown field "size"'));
+  assert.ok(has(check({ ...CAST, version: 2 }), '"cast" "version" must be 1'));
+  assert.ok(has(check({ ...CAST, entry: 'tv.png' }), '"cast.entry" must be the path of an .html file'));
+  assert.ok(has(check({ ...CAST, entry: 'index.html' }, null), 'not the app\'s "entry" (index.html)'));
+  assert.ok(has(check({ ...CAST, orientation: 'portrait' }), '"cast.orientation" must be "landscape"'));
+  assert.ok(has(check({ ...CAST, purpose: 'Board' }), '"cast.purpose" must be 10 to 140 characters'));
+  assert.ok(has(check(CAST, null), "the TV page tv.html isn't in the folder"));
+  assert.ok(has(check(undefined, null, undefined, ['cast']), '"requires" has "cast", so "cast" must name your TV page'));
+  // The TV is given only its own page: nothing may lead to another.
+  assert.ok(has(check(CAST, '<a href="index.html">Play</a>'), 'tv.html: points to index.html'));
+  assert.ok(has(check(CAST, '<script>location.href = "./index.html";</script>'), 'points to index.html'));
+  assert.ok(has(check({ ...CAST, entry: 'tv/board.html' }, '<a href="../index.html">', 'tv/board.html'), 'tv/board.html: points to index.html'));
+  assert.deepStrictEqual(check({ ...CAST, entry: 'tv/board.html' }, '<a href="levels/index.html">', 'tv/board.html'), []);
+  assert.deepStrictEqual(check(CAST, '<!-- not index.html --><link rel="stylesheet" href="style.css"><script src="batiyao-cast.js"></script>'), []);
+});
+
+test('cast on the phone: no-ops where there is no casting, the limits, the events', async () => {
+  const off = sdkWith((m) => (m === 'getContext' ? { result: { features: ['pay'] } } : { result: {} }));
+  assert.strictEqual(asJSON(await off.Batiyao.cast.setAvailable(true)), '{}');
+  assert.strictEqual(await code(off.Batiyao.cast.send({ board: [] })), 'NOT_CASTING');
+  assert.strictEqual(asJSON(await off.Batiyao.cast.state()), '{"state":"disconnected"}');
+  assert.strictEqual(await off.Batiyao.supports('cast'), false);
+  assert.deepStrictEqual(off.sent.map((x) => x.method), ['getContext'], 'nothing of cast reaches a Batiyao without it');
+  const outside = sdkWith(() => ({}), { framed: false }).Batiyao;
+  assert.strictEqual(asJSON(await outside.cast.setAvailable(false)), '{}');
+  assert.strictEqual(asJSON(await outside.cast.state()), '{"state":"disconnected"}');
+
+  const { Batiyao, sent, emit } = sdkWith((m) => (m === 'getContext' ? { result: { features: ['cast'] } } : m === 'cast.state' ? { result: { state: 'connected' } } : { result: {} }));
+  assert.strictEqual(await code(Batiyao.cast.setAvailable('yes')), 'INVALID');
+  assert.strictEqual(await code(Batiyao.cast.send({ s: 'x'.repeat(16384) })), 'CAST_LIMIT');
+  assert.strictEqual(await code(Batiyao.cast.send(undefined)), 'INVALID');
+  assert.strictEqual(sent.length, 0);
+  assert.strictEqual(asJSON(await Batiyao.cast.setAvailable(true)), '{}');
+  assert.strictEqual(await code(Batiyao.cast.send({ s: 'é'.repeat(8000) })), 'resolved', '16,000 bytes of UTF-8 fit');
+  assert.strictEqual(asJSON(await Batiyao.cast.state()), '{"state":"connected"}');
+  const burst = await Promise.all(Array.from({ length: 30 }, (_, i) => code(Batiyao.cast.send({ i }))));
+  assert.deepStrictEqual(burst.filter((c) => c !== 'resolved'), ['CAST_LIMIT'], '30 in any second, this one included the earlier send');
+  const wire = sent.filter((x) => x.method !== 'getContext').map((x) => x.method + ' ' + asJSON(x.params));
+  assert.strictEqual(wire[0], 'cast.setAvailable {"available":true}');
+  assert.ok(wire.includes('cast.send {"data":{"i":0}}'), 'the data goes as { data }');
+  assert.strictEqual(await Batiyao.supports('cast'), true);
+  assert.strictEqual(await Batiyao.supports('cast.send'), true);
+  const got = [];
+  Batiyao.on('cast.state', (d) => got.push(d.state));
+  Batiyao.on('cast.message', (d) => got.push(d.move));
+  emit('cast.state', { state: 'connected' });
+  emit('cast.message', { move: 'e4' });
+  assert.deepStrictEqual(got, ['connected', 'e4']);
+});
+
+// The TV page's SDK in a stand-in page, as sdkWith does for the app's.
+function castSdkWith(answer, { framed = true } = {}) {
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  const sent = [];
+  let onMessage = null;
+  const win = { addEventListener: (type, fn) => { if (type === 'message') onMessage = fn; } };
+  win.parent = framed ? {
+    postMessage(msg) {
+      sent.push(msg);
+      const out = answer(msg.method, msg.params);
+      setImmediate(() => onMessage({ source: win.parent, data: { batiyao: 1, id: msg.id, ...out } }));
+    },
+  } : win;
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'miniapp-sdk', 'batiyao-cast.js'), 'utf8'), { window: win, setTimeout, clearTimeout, Promise });
+  const emit = (event, data, source = win.parent) => onMessage({ source, data: { batiyao: 1, event, data } });
+  return { BatiyaoCast: win.BatiyaoCast, Batiyao: win.Batiyao, sent, emit };
+}
+
+test('the TV page SDK: ready, send with the same limits, message and ended, and nothing else', async () => {
+  const { BatiyaoCast, Batiyao, sent, emit } = castSdkWith(() => ({ result: {} }));
+  assert.strictEqual(BatiyaoCast.version, '1.0.0');
+  assert.strictEqual(Batiyao, undefined, 'a TV page has no Batiyao.*');
+  await BatiyaoCast.ready();
+  assert.strictEqual(await code(BatiyaoCast.send({ s: 'x'.repeat(16384) })), 'CAST_LIMIT');
+  assert.strictEqual(await code(BatiyaoCast.send(() => 1)), 'INVALID');
+  await BatiyaoCast.send({ hello: true });
+  const more = await Promise.all(Array.from({ length: 30 }, (_, i) => code(BatiyaoCast.send({ i }))));
+  assert.deepStrictEqual(more.filter((c) => c !== 'resolved'), ['CAST_LIMIT']);
+  assert.strictEqual(sent[0].method, 'cast.ready');
+  assert.strictEqual(asJSON(sent[1].params), '{"data":{"hello":true}}');
+  const got = [];
+  const onMsg = (d) => got.push(d.score);
+  BatiyaoCast.on('message', onMsg);
+  BatiyaoCast.on('ended', () => got.push('ended'));
+  emit('cast.message', { score: 3 });
+  emit('cast.message', { score: 4 }, {});           // not from the frame around it: ignored
+  BatiyaoCast.off('message', onMsg);
+  emit('cast.message', { score: 5 });
+  emit('cast.ended', {});
+  assert.deepStrictEqual(got, [3, 'ended']);
+  const outside = castSdkWith(() => ({}), { framed: false }).BatiyaoCast;
+  assert.strictEqual(await code(outside.ready()), 'NO_HOST');
+});
+
+test('the simulator shows the TV page beside the phone, served like a TV gets it', async () => {
+  const fs = require('node:fs');
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'mini-cast-'));
+  for (const f of readFolder(WINGBEAT)) {
+    let data = f.data;
+    if (f.path === 'manifest.json') data = Buffer.from(JSON.stringify({ ...JSON.parse(f.data), cast: CAST }));
+    fs.writeFileSync(path.join(dir, f.path), data);
+  }
+  fs.writeFileSync(path.join(dir, 'tv.html'), '<!doctype html><link rel="stylesheet" href="style.css"><script src="batiyao-cast.js"></script><h1>Board</h1>');
+  fs.copyFileSync(path.join(__dirname, '..', 'miniapp-sdk', 'batiyao-cast.js'), path.join(dir, 'batiyao-cast.js'));
+  const server = simulator.main([dir, '--port', '31095']);
+  await new Promise((r) => server.once('listening', r));
+  try {
+    const html = await (await fetch('http://127.0.0.1:31095/?cast_delay=250')).text();
+    const js = html.split('<script>')[1].split('</script>')[0];
+    new (require('node:vm').Script)(js);
+    for (const s of ['id="tv-frame" sandbox="allow-scripts"', 'id="tv-button"', 'id="tv-connected"', 'id="tv-delay"', "case 'cast.setAvailable':", "case 'cast.send':", ".concat(CAST ? ['cast'] : [])", "QS.get('cast_delay')"]) {
+      assert.ok(html.includes(s), s);
+    }
+    // The page's own limit check, both ways.
+    const castCheck = new Function(js.slice(js.indexOf('function castCheck'), js.indexOf('const castDelay')) + '; return castCheck;')();
+    const times = [];
+    assert.strictEqual(castCheck({ a: 1 }, times, 1000), null);
+    assert.strictEqual(castCheck({ s: 'x'.repeat(16384) }, times, 1000).code, 'CAST_LIMIT');
+    for (let i = 0; i < 29; i++) assert.strictEqual(castCheck({ i }, times, 1000 + i), null);
+    assert.strictEqual(castCheck({ i: 30 }, times, 1500).code, 'CAST_LIMIT');
+    assert.strictEqual(castCheck({ i: 30 }, times, 2000), null, 'a second later there is room again');
+    // The TV page at /tv/, its files beside it, and no other page.
+    const tv = await fetch('http://127.0.0.1:31095/tv/');
+    assert.strictEqual(tv.status, 200);
+    assert.match(tv.headers.get('content-security-policy'), /^sandbox allow-scripts allow-forms; default-src 'none'; script-src http:\/\/localhost:31095\/tv\//);
+    assert.match(await tv.text(), /^<!doctype html><script>.*<h1>Board<\/h1>$/s);
+    assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/style.css')).status, 200);
+    assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/batiyao-cast.js')).status, 200);
+    assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/index.html')).status, 404);
+    assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/tv.html')).status, 404);
+    assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/%2e%2e/package.json')).status, 404);
+  } finally {
+    server.close();
+  }
+  // An app without "cast" has no TV, and the simulator never lists cast for it.
+  const plain = simulator.main([WINGBEAT, '--port', '31094']);
+  await new Promise((r) => plain.once('listening', r));
+  try {
+    const html = await (await fetch('http://127.0.0.1:31094/')).text();
+    assert.ok(!html.includes('id="tv-frame"') && !html.includes('id="tv-button"'));
+    assert.match(html, /const CAST = null;/);
+    assert.strictEqual((await fetch('http://127.0.0.1:31094/tv/')).status, 404);
+  } finally {
+    plain.close();
+  }
 });

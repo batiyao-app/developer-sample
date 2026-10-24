@@ -64,6 +64,18 @@
 // event to a running app. multiplayer.invite() shows Batiyao's invite sheet
 // with the link to the match.
 //
+// Casting to a TV (SDK 1.12.0): when the manifest has "cast", a TV pane sits
+// beside the phone, 1920 x 1080 scaled to fit, with the TV page loaded the
+// way Batiyao's TV gets it: from /tv/, the TV page itself and only the
+// bundle's other non-HTML files, in a frame sandboxed like the app's.
+// Batiyao's TV button shows in the bar while the app has called
+// cast.setAvailable(true) (and while connected, so it can always stop);
+// it, or the page's "TV connected" switch, connects and disconnects and
+// fires 'cast.state'. Messages cross both ways with the real limits (16 KB
+// as JSON, 30 a second: CAST_LIMIT), and with a delay you choose, to see
+// what a real network does to your app: the Delay box, or /?cast_delay=300
+// (milliseconds). Reloading the app stops casting, as closing it does.
+//
 // It is a convenience, not the judge: before you upload, test on Batiyao
 // itself (Built by me → your app → Test), which runs the real host.
 'use strict';
@@ -121,6 +133,16 @@ function fileHeaders(base, net = []) {
 // page); the simulator makes one from the name.
 const slugOf = (manifest) => String(manifest.name || 'app').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'app';
 
+// "cast" (SDK 1.12.0): the TV page, when the manifest names one.
+const castOf = (manifest) => {
+  const c = manifest && manifest.cast;
+  return c && typeof c === 'object' && !Array.isArray(c) && typeof c.entry === 'string' ? c : null;
+};
+
+const TV_PANE = (cast) => `<div id="tv"><b>TV (simulated)</b> <small>1920 × 1080, scaled · ${String(cast.entry).replace(/[<&"]/g, '')} · what Batiyao shows on a Chromecast or Apple TV</small><br>
+<label style="margin-left:0"><input type="checkbox" id="tv-connected"> TV connected</label><label>Delay <input type="number" id="tv-delay" min="0" max="5000" step="50" value="0" style="width:64px"> ms</label>
+<div id="tv-box"><iframe id="tv-frame" sandbox="allow-scripts" src="about:blank" title="TV"></iframe><div id="tv-cover">Batiyao</div><div id="tv-from">From your phone · Batiyao</div></div></div>`;
+
 const HOST_PAGE = (manifest) => `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${manifest.name.replace(/[<&]/g, '')} — mini app simulator</title>
@@ -145,9 +167,14 @@ const HOST_PAGE = (manifest) => `<!doctype html>
   #admin{padding:8px 12px;border-bottom:1px solid #1e293b;background:#111c33} #admin small{color:#94a3b8}
   #admin .item{display:flex;gap:10px;align-items:center;margin-top:4px} #admin .item code{flex:1;color:#e2e8f0}
   #admin .declined code{color:#fca5a5;text-decoration:line-through}
+  #tv{padding:8px 12px;border-bottom:1px solid #1e293b;background:#0b1224} #tv small{color:#94a3b8} #tv label{margin-left:10px}
+  #tv-box{position:relative;width:100%;max-width:640px;aspect-ratio:16/9;background:#000;overflow:hidden;margin-top:6px;border-radius:6px}
+  #tv-box #tv-frame{position:absolute;left:0;top:0;width:1920px;height:1080px;flex:none;border:0;transform-origin:0 0;background:#000}
+  #tv-cover{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#111827;color:#fff;font:600 22px system-ui,sans-serif}
+  #tv-from{position:absolute;left:0;right:0;bottom:14%;text-align:center;color:#fff;font-size:13px;text-shadow:0 1px 3px #000;opacity:0;transition:opacity 1s;pointer-events:none}
 </style></head><body>
 <div id="stage">
-  <div id="bar"><b>${manifest.name.replace(/[<&]/g, '')}</b><small>SIMULATOR</small><button id="reload">Reload</button></div>
+  <div id="bar"><b>${manifest.name.replace(/[<&]/g, '')}</b><small>SIMULATOR</small>${castOf(manifest) ? '<button id="tv-button" style="display:none;white-space:nowrap" title="Batiyao\'s TV button: shows while the app has something to show">Show on TV</button>' : ''}<button id="reload">Reload</button></div>
   <iframe id="app" sandbox="allow-scripts allow-forms" src="/app/${manifest.entry || 'index.html'}"></iframe>
   <div id="share-sheet" class="sheetlike"><div class="card">
     <p><b>Share from ${manifest.name.replace(/[<&]/g, '')}</b><br><small>The sheet Batiyao draws: the person picks Story or Post and may change the words</small></p>
@@ -201,13 +228,15 @@ const HOST_PAGE = (manifest) => `<!doctype html>
     <div class="row"><button id="s-cancel">Cancel</button><button id="s-pay" class="pay">Pay</button></div>
   </div></div>
 </div>
-<div><div id="admin"><b>Admin review (simulated)</b> <small>On Batiyao an admin approves or declines each of these; here everything you declare starts approved. Decline one to see how your app copes.</small><div id="admin-items"></div></div><div id="tools"><button id="clear-storage">Clear saved data</button><button id="clear-purchases">Clear purchases</button><button id="visibility">Send visibility: hidden, then visible</button><label><input type="checkbox" id="pick-unavailable"> Photos and videos: unavailable (a child without the guardian's switch)</label><br>
+<div>${castOf(manifest) ? TV_PANE(castOf(manifest)) : ''}<div id="admin"><b>Admin review (simulated)</b> <small>On Batiyao an admin approves or declines each of these; here everything you declare starts approved. Decline one to see how your app copes.</small><div id="admin-items"></div></div><div id="tools"><button id="clear-storage">Clear saved data</button><button id="clear-purchases">Clear purchases</button><button id="visibility">Send visibility: hidden, then visible</button><label><input type="checkbox" id="pick-unavailable"> Photos and videos: unavailable (a child without the guardian's switch)</label><br>
 <button id="nickname">Nickname in this app</button><button id="follow-link">Follow a link…</button><button id="clear-shared">Clear the shared store</button>
 <label>Batiyao's AI: <select id="ai-mode"><option value="ready">ready</option><option value="needs_download">needs a download</option><option value="unavailable">unavailable</option></select></label>
 <label>Multiplayer: <select id="mp-mode"><option value="on">on</option><option value="off">off for this app</option><option value="ask_guardian">a child without the guardian's switch</option></select></label>
 <span id="who"></span></div><div id="log"></div></div>
 <script>
 const MANIFEST = ${JSON.stringify(manifest).replace(/</g, '\\u003c')};
+// "cast" (1.12.0): the app's TV page, or null when it has none.
+const CAST = ${JSON.stringify(castOf(manifest)).replace(/</g, '\\u003c')};
 const frame = document.getElementById('app');
 const logEl = document.getElementById('log');
 const KEY = 'sim:' + MANIFEST.app_id;
@@ -253,7 +282,9 @@ const features = () => ['pay', 'share', 'pickImage', 'pickVideo', 'db', 'nicknam
   .concat(aiMode() === 'unavailable' ? [] : Object.keys(DECLARED).filter((n) => n.startsWith('ai.') && !CAPS_DECLINED.has(n)))
   .concat(netOn() ? ['net'] : [])
   .concat(bgGranted() ? ['backgroundAudio'] : [])
-  .concat(youtubeOn() ? ['youtube'] : []);
+  .concat(youtubeOn() ? ['youtube'] : [])
+  // A phone that casts, with the TV page approved with the version.
+  .concat(CAST ? ['cast'] : []);
 let aiRunning = null;
 let nicking = null;
 const KEYRE = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -431,6 +462,20 @@ function handle(m) {
       if (aiRunning) { aiRunning.timers.forEach(clearTimeout); reply(aiRunning.id, { status: 'cancelled' }); aiRunning = null; }
       return reply(m.id, {});
     case 'close': reply(m.id, {}); log('the app asked to close', 'ev'); return;
+    // cast (1.12.0): the app says when there is something to show; only the
+    // person, with Batiyao's button, connects a TV.
+    case 'cast.setAvailable':
+      if (!CAST) return reply(m.id, {});
+      if (typeof p.available !== 'boolean') return bad('INVALID', 'setAvailable() takes true or false.');
+      castAvailable = p.available; castButton(); return reply(m.id, {});
+    case 'cast.state': return reply(m.id, { state: castOn ? 'connected' : 'disconnected' });
+    case 'cast.send': {
+      if (!castOn) return bad('NOT_CASTING', 'Nothing is being shown on a TV.');
+      const err = castCheck(p.data, toTV, Date.now());
+      if (err) return bad(err.code, err.message);
+      castDeliver(() => tvPost({ batiyao: 1, event: 'cast.message', data: p.data }));
+      return reply(m.id, {});
+    }
     default:
       if (SOCIAL[m.method]) return SOCIAL[m.method](m, p).catch((e) => bad((e && e.code) || 'FAILED', String(e && e.message || e)));
       return bad('UNKNOWN_METHOD', 'Batiyao doesn\\'t know "' + m.method + '".');
@@ -1155,10 +1200,105 @@ document.getElementById('follow-link').onclick = () => {
   frame.contentWindow.postMessage({ batiyao: 1, event: 'link', data: { join: code } }, '*');
   log('event link ' + JSON.stringify({ join: code }), 'ev');
 };
+// --- cast (1.12.0): the TV beside the phone. The TV page talks only to
+// this page (BatiyaoCast), which relays to and from the app, as Batiyao's
+// TV does: the same limits both ways, after the chosen delay.
+let castAvailable = false, castOn = false, castSession = 0, tvLoaded = false, tvQueue = [], toTV = [], fromTV = [];
+const tvFrame = document.getElementById('tv-frame');
+// castCheck: null when this message may go, or the error Batiyao answers.
+// At most 16 KB as JSON, and 30 in any second (times: when the last ones went).
+function castCheck(data, times, now) {
+  let s;
+  try { s = JSON.stringify(data); } catch (e) { s = undefined; }
+  if (typeof s !== 'string') return { code: 'INVALID', message: 'A message is data that can be sent as JSON.' };
+  if (new TextEncoder().encode(s).length > 16384) return { code: 'CAST_LIMIT', message: 'A message is at most 16 KB as JSON.' };
+  while (times.length && now - times[0] >= 1000) times.shift();
+  if (times.length >= 30) return { code: 'CAST_LIMIT', message: 'At most 30 messages a second.' };
+  times.push(now);
+  return null;
+}
+const castDelay = () => { const el = document.getElementById('tv-delay'); return el ? Math.max(0, Math.min(5000, Number(el.value) || 0)) : 0; };
+// After the delay, and only if the same connection is still up.
+function castDeliver(fn) {
+  const s = castSession;
+  setTimeout(() => { if (castOn && s === castSession) fn(); }, castDelay());
+}
+// To the TV page; held until it has loaded, as the TV's relay does.
+function tvPost(msg) {
+  if (!tvLoaded) { tvQueue.push(msg); return; }
+  tvFrame.contentWindow.postMessage(msg, '*');
+  if (msg.event) log('⇢ TV event ' + msg.event + ' ' + JSON.stringify(msg.data), 'ev');
+}
+function castButton() {
+  const b = document.getElementById('tv-button');
+  if (!b) return;
+  b.style.display = castAvailable || castOn ? '' : 'none';
+  b.textContent = castOn ? 'On TV · Stop' : 'Show on TV';
+}
+function castConnect(on, why) {
+  if (!CAST || on === castOn) return;
+  const cover = document.getElementById('tv-cover');
+  document.getElementById('tv-connected').checked = on;
+  if (on) {
+    castOn = true; castSession++; tvLoaded = false; tvQueue = []; toTV = []; fromTV = [];
+    cover.textContent = 'Batiyao · loading…'; cover.style.display = 'flex';
+    tvFrame.src = '/tv/';
+  } else {
+    // The TV page hears 'ended'; then the TV goes back to Batiyao's own screen.
+    if (tvLoaded) tvPost({ batiyao: 1, event: 'cast.ended', data: {} });
+    castOn = false; castSession++;
+    const s = castSession;
+    setTimeout(() => { if (!castOn && s === castSession) { tvLoaded = false; tvFrame.src = 'about:blank'; cover.textContent = 'Batiyao'; cover.style.display = 'flex'; } }, 500);
+  }
+  castButton();
+  log('TV ' + (on ? 'connected' : 'disconnected') + ' (' + why + ')', 'ev');
+  event('cast.state', { state: on ? 'connected' : 'disconnected' });
+}
+if (CAST) {
+  const box = document.getElementById('tv-box');
+  const fit = () => { tvFrame.style.transform = 'scale(' + box.clientWidth / 1920 + ')'; };
+  new ResizeObserver(fit).observe(box);
+  fit();
+  const d = Number(QS.get('cast_delay'));
+  if (Number.isFinite(d) && d > 0) document.getElementById('tv-delay').value = String(Math.min(5000, Math.round(d)));
+  tvFrame.addEventListener('load', () => {
+    if (!castOn || !/\\/tv\\/$/.test(tvFrame.src)) return;
+    tvLoaded = true;
+    const from = document.getElementById('tv-from');
+    from.style.opacity = '1';
+    setTimeout(() => { from.style.opacity = '0'; }, 4000);
+    const q = tvQueue; tvQueue = [];
+    q.forEach(tvPost);
+  });
+  document.getElementById('tv-button').onclick = () => castConnect(!castOn, 'Batiyao’s TV button');
+  document.getElementById('tv-connected').onchange = (e) => castConnect(e.target.checked, 'the TV connected switch');
+}
+// The TV page's own calls: BatiyaoCast.ready() and send(), nothing else.
+window.addEventListener('message', (e) => {
+  if (!CAST || e.source !== tvFrame.contentWindow) return;
+  const m = e.data;
+  if (!m || m.batiyao !== 1 || typeof m.id !== 'string' || typeof m.method !== 'string') return;
+  const p = m.params || {};
+  const answer = (result, error) => {
+    e.source.postMessage(error ? { batiyao: 1, id: m.id, error } : { batiyao: 1, id: m.id, result }, '*');
+    if (error) log('✗ TV ' + error.code + ' ' + error.message, 'err');
+  };
+  log('TV → ' + m.method + ' ' + JSON.stringify(p));
+  if (!castOn) return answer(null, { code: 'NOT_CASTING', message: 'This TV is no longer showing the app.' });
+  if (m.method === 'cast.ready') { document.getElementById('tv-cover').style.display = 'none'; return answer({}); }
+  if (m.method === 'cast.send') {
+    const err = castCheck(p.data, fromTV, Date.now());
+    if (err) return answer(null, err);
+    castDeliver(() => event('cast.message', p.data));
+    return answer({});
+  }
+  answer(null, { code: 'UNKNOWN_METHOD', message: 'A TV page has only BatiyaoCast (ready, send, on): no Batiyao.* calls.' });
+});
 const loadAdmin = () => api('admin.get').then((r) => r.result && renderAdmin(r.result)).catch(() => {});
 loadAdmin();
 // Reload also picks up a manifest you edited (new addresses or capabilities).
-document.getElementById('reload').onclick = () => { loadAdmin(); frame.src = frame.src; };
+// An app reloaded is an app closed: casting stops with it.
+document.getElementById('reload').onclick = () => { castConnect(false, 'the app was reloaded'); castAvailable = false; castButton(); loadAdmin(); frame.src = frame.src; };
 document.getElementById('clear-storage').onclick = () => { save(':storage', {}); log('saved data cleared', 'ev'); };
 document.getElementById('clear-purchases').onclick = () => { save(':purchases', []); log('purchases cleared', 'ev'); };
 document.getElementById('visibility').onclick = () => {
@@ -1556,6 +1696,24 @@ function main(argv) {
   // net.fetch (SDK 1.8.0): declared in "capabilities" and not declined in
   // the simulated admin review, and only to the approved addresses.
   const netFetchOn = () => sim.declared().caps.includes('net.fetch') && !sim.declined.caps.has('net.fetch');
+  // One file of the bundle, read from disk each time so a save in your
+  // editor shows on Reload, with the sandbox's headers for that base.
+  const serveFile = (res, rel, from) => {
+    const full = path.resolve(dir, rel);
+    if (!full.startsWith(path.resolve(dir) + path.sep) || !fs.existsSync(full) || !fs.statSync(full).isFile()) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      return res.end('Not in the bundle');
+    }
+    const ext = path.extname(full).slice(1).toLowerCase();
+    let data = fs.readFileSync(full);
+    if (ext === 'html' || ext === 'htm') {
+      const page = data.toString('utf8');
+      const m = page.match(/^﻿?\s*<!doctype[^>]*>/i);
+      data = Buffer.from(m ? m[0] + GUARD + page.slice(m[0].length) : GUARD + page);
+    }
+    res.writeHead(200, { 'Content-Type': TYPES[ext] || 'application/octet-stream', ...fileHeaders(from, approvedNet()) });
+    return res.end(data);
+  };
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, base);
     if (url.pathname === '/sim/api' && req.method === 'POST') return simAPI(sim, req, res);
@@ -1563,25 +1721,23 @@ function main(argv) {
     if (url.pathname === '/sim/mp/events') return simEvents(sim, url, req, res);
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(HOST_PAGE(manifest));
+      // "cast" is read again, so a TV page added to the manifest shows on a reload of this page.
+      let cast = castOf(manifest);
+      try { cast = castOf(JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'))); } catch (e) { /* the last good one */ }
+      return res.end(HOST_PAGE({ ...manifest, cast }));
     }
-    if (url.pathname.startsWith('/app/')) {
-      // Read from disk each time, so a save in your editor shows on Reload.
-      const rel = decodeURIComponent(url.pathname.slice(5));
-      const full = path.resolve(dir, rel);
-      if (!full.startsWith(path.resolve(dir) + path.sep) || !fs.existsSync(full) || !fs.statSync(full).isFile()) {
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        return res.end('Not in the bundle');
-      }
-      const ext = path.extname(full).slice(1).toLowerCase();
-      let data = fs.readFileSync(full);
-      if (ext === 'html' || ext === 'htm') {
-        const page = data.toString('utf8');
-        const m = page.match(/^﻿?\s*<!doctype[^>]*>/i);
-        data = Buffer.from(m ? m[0] + GUARD + page.slice(m[0].length) : GUARD + page);
-      }
-      res.writeHead(200, { 'Content-Type': TYPES[ext] || 'application/octet-stream', ...fileHeaders(base, approvedNet()) });
-      return res.end(data);
+    if (url.pathname.startsWith('/app/')) return serveFile(res, decodeURIComponent(url.pathname.slice(5)), base);
+    // The TV page (SDK 1.12.0), as Batiyao serves it to a TV
+    // (https://miniapps.batiyao.com/c/<token>/): the page itself at the
+    // root, the bundle's other files beside it, and no other page.
+    if (url.pathname.startsWith('/tv/')) {
+      let m = manifest;
+      try { m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch (e) { /* the last good one */ }
+      const cast = castOf(m);
+      const rel = decodeURIComponent(url.pathname.slice(4));
+      if (!cast) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('This app has no "cast" in manifest.json'); }
+      if (/\.html?$/i.test(rel)) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('Not served to a TV: a TV is given only the TV page'); }
+      return serveFile(res, rel === '' ? cast.entry : rel, `http://localhost:${port}/tv/`);
     }
     res.writeHead(404);
     res.end();
@@ -1598,4 +1754,4 @@ if (require.main === module) {
   if (typeof r === 'number') process.exit(r);
 }
 
-module.exports = { main, createSimState, simOp, mpOp, sweepMatches, fileHeaders, slugOf };
+module.exports = { main, createSimState, simOp, mpOp, sweepMatches, fileHeaders, slugOf, castOf };
