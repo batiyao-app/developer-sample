@@ -41,12 +41,16 @@
  *   rejections go to the phone that is casting, into its own log, so a
  *   problem on a TV in somebody's living room can be found (at most 20 a
  *   minute; the error's text and stack only, nothing of your page's data).
+ * 1.2.0 (2026-10-24): sound. A TV page's sound starts by itself — nobody can
+ *   tap a TV, and Batiyao lets the page play without a tap. An AudioContext
+ *   still suspended a moment after ready() (or after it is made) is resumed
+ *   once, and reported to the phone's log if it stays suspended.
  */
 (function (global) {
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.1.0';
+  var VERSION = '1.2.0';
   var MAX_BYTES = 16384;
   var PER_SECOND = 30;
   var pending = Object.create(null);
@@ -125,12 +129,12 @@
   // This page's own errors, reported to the phone's log (1.1.0). A TV has
   // no console anybody can see. Never retried, never in the way.
   var logTimes = [];
-  function report(text, stack) {
+  function report(text, stack, level) {
     var now = Date.now();
     while (logTimes.length && now - logTimes[0] >= 60000) logTimes.shift();
     if (!isFramed || logTimes.length >= 20) return;
     logTimes.push(now);
-    send('cast.log', { level: 'error', text: String(text).slice(0, 1000), stack: stack ? String(stack).slice(0, 4000) : '' }, 10000)
+    send('cast.log', { level: level === 'warn' ? 'warn' : 'error', text: String(text).slice(0, 1000), stack: stack ? String(stack).slice(0, 4000) : '' }, 10000)
       .catch(function () { /* an older Batiyao: UNKNOWN_METHOD */ });
   }
   global.addEventListener('error', function (e) {
@@ -145,11 +149,47 @@
     report('Unhandled rejection: ' + (r && r.message ? (r.name ? r.name + ': ' : '') + r.message : String(r)), r && r.stack);
   });
 
+  // Sound (1.2.0): every AudioContext the page makes is watched, so one the
+  // TV keeps suspended is resumed once and, failing that, reported.
+  var contexts = [];
+  var isReady = false;
+  function checkAudio(c) {
+    if (!c || c.__batiyaoChecked) return;
+    c.__batiyaoChecked = true;
+    setTimeout(function () {
+      if (c.state !== 'suspended') return;
+      var p;
+      try { p = c.resume(); } catch (e) { /* closed */ }
+      setTimeout(function () {
+        if (c.state === 'suspended') {
+          report('An AudioContext stayed suspended on the TV: its sound is blocked.', '', 'warn');
+        }
+      }, 1000);
+      if (p && p.catch) p.catch(function () { /* reported above */ });
+    }, 2000);
+  }
+  ['AudioContext', 'webkitAudioContext'].forEach(function (name) {
+    var AC = global[name];
+    if (typeof AC !== 'function') return;
+    var Watched = function (options) {
+      var c = arguments.length ? new AC(options) : new AC();
+      contexts.push(c);
+      if (isReady) checkAudio(c);
+      return c;
+    };
+    Watched.prototype = AC.prototype;
+    try { global[name] = Watched; } catch (e) { /* read-only: not watched */ }
+  });
+
   var BatiyaoCast = {
     version: VERSION,
 
     /** Tell Batiyao the page has drawn; the TV's loading screen goes. */
     ready: function () {
+      if (!isReady) {
+        isReady = true;
+        contexts.forEach(checkAudio);
+      }
       return send('cast.ready', {}, 10000);
     },
 

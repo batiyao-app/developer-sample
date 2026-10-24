@@ -143,7 +143,7 @@ const castOf = (manifest) => {
 
 const TV_PANE = (cast) => `<div id="tv"><b>TV (simulated)</b> <small>1920 × 1080, scaled · ${String(cast.entry).replace(/[<&"]/g, '')} · what Batiyao shows on a Chromecast or Apple TV</small><br>
 <label style="margin-left:0"><input type="checkbox" id="tv-connected"> TV connected</label><label>Delay <input type="number" id="tv-delay" min="0" max="5000" step="50" value="0" style="width:64px"> ms</label>
-<div id="tv-box"><iframe id="tv-frame" sandbox="allow-scripts" src="about:blank" title="TV"></iframe><div id="tv-cover">Batiyao</div><div id="tv-from">From your phone · Batiyao</div></div></div>`;
+<div id="tv-box"><iframe id="tv-frame" sandbox="allow-scripts" allow="autoplay" src="about:blank" title="TV"></iframe><div id="tv-cover">Batiyao</div><div id="tv-from">From your phone · Batiyao</div></div></div>`;
 
 const HOST_PAGE = (manifest) => `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

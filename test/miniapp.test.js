@@ -1017,7 +1017,7 @@ test('cast on the phone: no-ops where there is no casting, the limits, the event
 });
 
 // The TV page's SDK in a stand-in page, as sdkWith does for the app's.
-function castSdkWith(answer, { framed = true } = {}) {
+function castSdkWith(answer, { framed = true, AudioContext } = {}) {
   const vm = require('node:vm');
   const fs = require('node:fs');
   const sent = [];
@@ -1031,9 +1031,10 @@ function castSdkWith(answer, { framed = true } = {}) {
       setImmediate(() => onMessage({ source: win.parent, data: { batiyao: 1, id: msg.id, ...out } }));
     },
   } : win;
+  if (AudioContext) win.AudioContext = AudioContext;
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'miniapp-sdk', 'batiyao-cast.js'), 'utf8'), { window: win, setTimeout, clearTimeout, Promise });
   const emit = (event, data, source = win.parent) => onMessage({ source, data: { batiyao: 1, event, data } });
-  return { BatiyaoCast: win.BatiyaoCast, Batiyao: win.Batiyao, sent, emit, handlers };
+  return { BatiyaoCast: win.BatiyaoCast, Batiyao: win.Batiyao, sent, emit, handlers, win };
 }
 
 test('the TV page SDK sends the page\'s own errors to the phone\'s log, at most 20 a minute', async () => {
@@ -1053,9 +1054,25 @@ test('the TV page SDK sends the page\'s own errors to the phone\'s log, at most 
   assert.strictEqual(sent.filter((m) => m.method === 'cast.log').length, 20, 'an older Batiyao answering UNKNOWN_METHOD is ignored, and the cap holds');
 });
 
+test('the TV page SDK resumes a suspended AudioContext and reports one the TV keeps suspended', async () => {
+  class FakeAC { constructor() { this.state = 'suspended'; } resume() { if (this.unblocks) this.state = 'running'; return Promise.resolve(); } }
+  const { BatiyaoCast, sent, win } = castSdkWith(() => ({ result: {} }), { AudioContext: FakeAC });
+  const blocked = new win.AudioContext();
+  assert.ok(blocked instanceof FakeAC, 'the watched constructor still makes the real thing');
+  const fine = new win.AudioContext();
+  fine.unblocks = true;
+  await BatiyaoCast.ready();
+  await new Promise((r) => setTimeout(r, 3300));
+  assert.strictEqual(fine.state, 'running', 'resumed once');
+  const logs = sent.filter((m) => m.method === 'cast.log');
+  assert.strictEqual(logs.length, 1);
+  assert.strictEqual(logs[0].params.level, 'warn');
+  assert.match(logs[0].params.text, /AudioContext stayed suspended/);
+});
+
 test('the TV page SDK: ready, send with the same limits, message and ended, and nothing else', async () => {
   const { BatiyaoCast, Batiyao, sent, emit } = castSdkWith(() => ({ result: {} }));
-  assert.strictEqual(BatiyaoCast.version, '1.1.0');
+  assert.strictEqual(BatiyaoCast.version, '1.2.0');
   assert.strictEqual(Batiyao, undefined, 'a TV page has no Batiyao.*');
   await BatiyaoCast.ready();
   assert.strictEqual(await code(BatiyaoCast.send({ s: 'x'.repeat(16384) })), 'CAST_LIMIT');
@@ -1095,7 +1112,7 @@ test('the simulator shows the TV page beside the phone, served like a TV gets it
     const html = await (await fetch('http://127.0.0.1:31095/?cast_delay=250')).text();
     const js = html.split('<script>')[1].split('</script>')[0];
     new (require('node:vm').Script)(js);
-    for (const s of ["tvFrame.src = '/tv/' + CAST.entry;", 'id="tv-frame" sandbox="allow-scripts"', 'id="tv-button"', 'id="tv-connected"', 'id="tv-delay"', "case 'cast.setAvailable':", "case 'cast.send':", ".concat(CAST ? ['cast'] : [])", "QS.get('cast_delay')"]) {
+    for (const s of ["tvFrame.src = '/tv/' + CAST.entry;", 'id="tv-frame" sandbox="allow-scripts" allow="autoplay"', 'id="tv-button"', 'id="tv-connected"', 'id="tv-delay"', "case 'cast.setAvailable':", "case 'cast.send':", ".concat(CAST ? ['cast'] : [])", "QS.get('cast_delay')"]) {
       assert.ok(html.includes(s), s);
     }
     // The page's own limit check, both ways.
