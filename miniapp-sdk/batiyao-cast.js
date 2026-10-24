@@ -36,12 +36,17 @@
  * Design for 1920 x 1080, seen from across a room: big type, strong
  * contrast, nothing that needs a tap or a hover (a TV has no touch), and
  * nothing important near the edges (some TVs crop them).
+ *
+ * 1.1.0 (2026-10-24): this page's uncaught errors and unhandled promise
+ *   rejections go to the phone that is casting, into its own log, so a
+ *   problem on a TV in somebody's living room can be found (at most 20 a
+ *   minute; the error's text and stack only, nothing of your page's data).
  */
 (function (global) {
   'use strict';
 
   var PROTOCOL = 1;
-  var VERSION = '1.0.0';
+  var VERSION = '1.1.0';
   var MAX_BYTES = 16384;
   var PER_SECOND = 30;
   var pending = Object.create(null);
@@ -115,6 +120,29 @@
     }
     if (data.event === 'cast.message') emit('message', data.data);
     else if (data.event === 'cast.ended') emit('ended', data.data || {});
+  });
+
+  // This page's own errors, reported to the phone's log (1.1.0). A TV has
+  // no console anybody can see. Never retried, never in the way.
+  var logTimes = [];
+  function report(text, stack) {
+    var now = Date.now();
+    while (logTimes.length && now - logTimes[0] >= 60000) logTimes.shift();
+    if (!isFramed || logTimes.length >= 20) return;
+    logTimes.push(now);
+    send('cast.log', { level: 'error', text: String(text).slice(0, 1000), stack: stack ? String(stack).slice(0, 4000) : '' }, 10000)
+      .catch(function () { /* an older Batiyao: UNKNOWN_METHOD */ });
+  }
+  global.addEventListener('error', function (e) {
+    if (!e || (!e.error && !e.message)) return; // a file that didn't load
+    var err = e.error;
+    report((err && err.name ? err.name + ': ' : '') + (err && err.message ? err.message : e.message) +
+      (e.lineno ? ' (' + (e.filename ? String(e.filename).split('/').pop() : '') + ':' + e.lineno + ':' + e.colno + ')' : ''),
+      err && err.stack);
+  });
+  global.addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason;
+    report('Unhandled rejection: ' + (r && r.message ? (r.name ? r.name + ': ' : '') + r.message : String(r)), r && r.stack);
   });
 
   var BatiyaoCast = {

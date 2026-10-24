@@ -165,7 +165,7 @@ from the internet. You host nothing. The full guide is at
 | | |
 |---|---|
 | [`miniapp-sdk/batiyao-miniapp.js`](miniapp-sdk/batiyao-miniapp.js) | The SDK (1.12.0): one file, copy it into your app. `ready`, `getContext` (with `link` when opened from an invite link), `storage`, `pay`, `share`, `pickImage`, `pickVideo`, `getNickname`, `db`, `multiplayer` (with `invite()`), `ai` (BGen pictures, BAudio sounds, Batiyao AI answers), `cast` (a TV view), `capability`, `supports`, `getPurchases`, `consume`, `close`. |
-| [`miniapp-sdk/batiyao-cast.js`](miniapp-sdk/batiyao-cast.js) | The TV page's SDK (1.0.0), for an app with a TV view: `BatiyaoCast.ready`, `send`, `on('message' \| 'ended')`. |
+| [`miniapp-sdk/batiyao-cast.js`](miniapp-sdk/batiyao-cast.js) | The TV page's SDK (1.1.0), for an app with a TV view: `BatiyaoCast.ready`, `send`, `on('message' \| 'ended')`. Your TV page's uncaught errors go to the casting phone's log (a TV has no console you can see). |
 | [`miniapp/wingbeat/`](miniapp/wingbeat) | The sample game: saved best score, a consumable (golden feathers), a permanent purchase (night sky), and "Share my score" (a score card drawn on a canvas, offered with `share()`). Live on Batiyao — open Mini apps and play it. |
 | [`tools/miniapp-simulator.js`](tools/miniapp-simulator.js) | A stand-in for Batiyao on your machine: same sandbox, a payment sheet from your manifest, share and photo/video sheets, nicknames, a shared store and multiplayer across tabs, a TV beside the phone, a log of every SDK call. |
 | [`tools/pack-miniapp.js`](tools/pack-miniapp.js) | Checks the folder against Batiyao's upload rules and zips it. |

@@ -1022,7 +1022,8 @@ function castSdkWith(answer, { framed = true } = {}) {
   const fs = require('node:fs');
   const sent = [];
   let onMessage = null;
-  const win = { addEventListener: (type, fn) => { if (type === 'message') onMessage = fn; } };
+  const handlers = {};
+  const win = { addEventListener: (type, fn) => { if (type === 'message') onMessage = fn; else handlers[type] = fn; } };
   win.parent = framed ? {
     postMessage(msg) {
       sent.push(msg);
@@ -1032,12 +1033,29 @@ function castSdkWith(answer, { framed = true } = {}) {
   } : win;
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'miniapp-sdk', 'batiyao-cast.js'), 'utf8'), { window: win, setTimeout, clearTimeout, Promise });
   const emit = (event, data, source = win.parent) => onMessage({ source, data: { batiyao: 1, event, data } });
-  return { BatiyaoCast: win.BatiyaoCast, Batiyao: win.Batiyao, sent, emit };
+  return { BatiyaoCast: win.BatiyaoCast, Batiyao: win.Batiyao, sent, emit, handlers };
 }
+
+test('the TV page SDK sends the page\'s own errors to the phone\'s log, at most 20 a minute', async () => {
+  const { sent, handlers } = castSdkWith((method) => (method === 'cast.log' ? { error: { code: 'UNKNOWN_METHOD', message: 'old' } } : { result: {} }));
+  const err = new TypeError('x is not a function');
+  handlers.error({ error: err, message: err.message, filename: 'https://miniapps.batiyao.com/c/t/board.js', lineno: 4, colno: 2 });
+  handlers.unhandledrejection({ reason: new Error('nope') });
+  handlers.error({ message: '' });                    // a file that didn't load: not an error of the page's code
+  await new Promise((r) => setImmediate(r));
+  const logs = sent.filter((m) => m.method === 'cast.log');
+  assert.strictEqual(logs.length, 2);
+  assert.strictEqual(logs[0].params.text, 'TypeError: x is not a function (board.js:4:2)');
+  assert.ok(logs[0].params.stack.includes('TypeError'));
+  assert.strictEqual(logs[1].params.text, 'Unhandled rejection: Error: nope');
+  for (let i = 0; i < 30; i++) handlers.error({ error: new Error('e' + i), message: 'e' });
+  await new Promise((r) => setImmediate(r));
+  assert.strictEqual(sent.filter((m) => m.method === 'cast.log').length, 20, 'an older Batiyao answering UNKNOWN_METHOD is ignored, and the cap holds');
+});
 
 test('the TV page SDK: ready, send with the same limits, message and ended, and nothing else', async () => {
   const { BatiyaoCast, Batiyao, sent, emit } = castSdkWith(() => ({ result: {} }));
-  assert.strictEqual(BatiyaoCast.version, '1.0.0');
+  assert.strictEqual(BatiyaoCast.version, '1.1.0');
   assert.strictEqual(Batiyao, undefined, 'a TV page has no Batiyao.*');
   await BatiyaoCast.ready();
   assert.strictEqual(await code(BatiyaoCast.send({ s: 'x'.repeat(16384) })), 'CAST_LIMIT');

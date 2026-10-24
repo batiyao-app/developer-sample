@@ -1294,6 +1294,11 @@ window.addEventListener('message', (e) => {
     castDeliver(() => event('cast.message', p.data));
     return answer({});
   }
+  if (m.method === 'cast.log') {
+    // What the receiver sends the phone as {type:'log'} (app §118.8).
+    log('TV page ' + (p.level === 'warn' ? 'warning' : 'error') + ': ' + p.text + (p.stack ? ' — ' + String(p.stack).split(String.fromCharCode(10))[0] : ''), 'err');
+    return answer({});
+  }
   answer(null, { code: 'UNKNOWN_METHOD', message: 'A TV page has only BatiyaoCast (ready, send, on): no Batiyao.* calls.' });
 });
 const loadAdmin = () => api('admin.get').then((r) => r.result && renderAdmin(r.result)).catch(() => {});
