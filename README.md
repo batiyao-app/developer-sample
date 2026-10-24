@@ -251,7 +251,7 @@ The rules that shape the code:
 
   `entry` is an `.html` page of the bundle other than your app's `entry`,
   and it may not lead to any other page (a TV is given only that page and
-  your other files); `orientation` is `"landscape"` if you give it, and
+  your other files, at the same paths as in your folder); `orientation` is `"landscape"` if you give it, and
   `purpose` is 10-140 characters. Offer a view the whole room shares — the
   board, the scores, a replay — never the private parts of a game. On the
   phone:

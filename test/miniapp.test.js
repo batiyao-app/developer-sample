@@ -1077,7 +1077,7 @@ test('the simulator shows the TV page beside the phone, served like a TV gets it
     const html = await (await fetch('http://127.0.0.1:31095/?cast_delay=250')).text();
     const js = html.split('<script>')[1].split('</script>')[0];
     new (require('node:vm').Script)(js);
-    for (const s of ['id="tv-frame" sandbox="allow-scripts"', 'id="tv-button"', 'id="tv-connected"', 'id="tv-delay"', "case 'cast.setAvailable':", "case 'cast.send':", ".concat(CAST ? ['cast'] : [])", "QS.get('cast_delay')"]) {
+    for (const s of ["tvFrame.src = '/tv/' + CAST.entry;", 'id="tv-frame" sandbox="allow-scripts"', 'id="tv-button"', 'id="tv-connected"', 'id="tv-delay"', "case 'cast.setAvailable':", "case 'cast.send':", ".concat(CAST ? ['cast'] : [])", "QS.get('cast_delay')"]) {
       assert.ok(html.includes(s), s);
     }
     // The page's own limit check, both ways.
@@ -1088,16 +1088,30 @@ test('the simulator shows the TV page beside the phone, served like a TV gets it
     for (let i = 0; i < 29; i++) assert.strictEqual(castCheck({ i }, times, 1000 + i), null);
     assert.strictEqual(castCheck({ i: 30 }, times, 1500).code, 'CAST_LIMIT');
     assert.strictEqual(castCheck({ i: 30 }, times, 2000), null, 'a second later there is room again');
-    // The TV page at /tv/, its files beside it, and no other page.
+    // The TV page at its own path (the root redirects there), the bundle's
+    // other files at theirs, and no other page.
+    const root = await fetch('http://127.0.0.1:31095/tv/', { redirect: 'manual' });
+    assert.strictEqual(root.status, 302);
+    assert.strictEqual(root.headers.get('location'), '/tv/tv.html');
     const tv = await fetch('http://127.0.0.1:31095/tv/');
     assert.strictEqual(tv.status, 200);
+    assert.ok(tv.url.endsWith('/tv/tv.html'));
     assert.match(tv.headers.get('content-security-policy'), /^sandbox allow-scripts allow-forms; default-src 'none'; script-src http:\/\/localhost:31095\/tv\//);
     assert.match(await tv.text(), /^<!doctype html><script>.*<h1>Board<\/h1>$/s);
     assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/style.css')).status, 200);
     assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/batiyao-cast.js')).status, 200);
     assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/index.html')).status, 404);
-    assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/tv.html')).status, 404);
+    assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/tv.html')).status, 200);
     assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/%2e%2e/package.json')).status, 404);
+    // A TV page in a subfolder: its relative links work as in the bundle.
+    fs.mkdirSync(path.join(dir, 'tv'));
+    fs.writeFileSync(path.join(dir, 'tv', 'board.html'), '<!doctype html><script src="board.js"></script>');
+    fs.writeFileSync(path.join(dir, 'tv', 'board.js'), 'BatiyaoCast.ready();');
+    fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'))), cast: { ...CAST, entry: 'tv/board.html' } }));
+    const sub = await fetch('http://127.0.0.1:31095/tv/');
+    assert.ok(sub.url.endsWith('/tv/tv/board.html'));
+    assert.strictEqual((await fetch(new URL('board.js', sub.url))).status, 200);
+    assert.strictEqual((await fetch('http://127.0.0.1:31095/tv/tv.html')).status, 404, 'the old TV page is just another page now');
   } finally {
     server.close();
   }

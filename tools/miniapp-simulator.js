@@ -66,8 +66,10 @@
 //
 // Casting to a TV (SDK 1.12.0): when the manifest has "cast", a TV pane sits
 // beside the phone, 1920 x 1080 scaled to fit, with the TV page loaded the
-// way Batiyao's TV gets it: from /tv/, the TV page itself and only the
-// bundle's other non-HTML files, in a frame sandboxed like the app's.
+// way Batiyao's TV gets it: from /tv/<cast.entry>, with the bundle's other
+// non-HTML files at their own paths beside it (so relative links work as in
+// the bundle, from a subfolder too) and no other page, in a frame sandboxed
+// like the app's.
 // Batiyao's TV button shows in the bar while the app has called
 // cast.setAvailable(true) (and while connected, so it can always stop);
 // it, or the page's "TV connected" switch, connects and disconnects and
@@ -1242,7 +1244,7 @@ function castConnect(on, why) {
   if (on) {
     castOn = true; castSession++; tvLoaded = false; tvQueue = []; toTV = []; fromTV = [];
     cover.textContent = 'Batiyao · loading…'; cover.style.display = 'flex';
-    tvFrame.src = '/tv/';
+    tvFrame.src = '/tv/' + CAST.entry;
   } else {
     // The TV page hears 'ended'; then the TV goes back to Batiyao's own screen.
     if (tvLoaded) tvPost({ batiyao: 1, event: 'cast.ended', data: {} });
@@ -1262,7 +1264,7 @@ if (CAST) {
   const d = Number(QS.get('cast_delay'));
   if (Number.isFinite(d) && d > 0) document.getElementById('tv-delay').value = String(Math.min(5000, Math.round(d)));
   tvFrame.addEventListener('load', () => {
-    if (!castOn || !/\\/tv\\/$/.test(tvFrame.src)) return;
+    if (!castOn || !tvFrame.src.includes('/tv/')) return;
     tvLoaded = true;
     const from = document.getElementById('tv-from');
     from.style.opacity = '1';
@@ -1728,16 +1730,18 @@ function main(argv) {
     }
     if (url.pathname.startsWith('/app/')) return serveFile(res, decodeURIComponent(url.pathname.slice(5)), base);
     // The TV page (SDK 1.12.0), as Batiyao serves it to a TV
-    // (https://miniapps.batiyao.com/c/<token>/): the page itself at the
-    // root, the bundle's other files beside it, and no other page.
+    // (https://miniapps.batiyao.com/c/<token>/): the root redirects to the
+    // TV page at its own path, the bundle's other files are at theirs, and
+    // no other page is served.
     if (url.pathname.startsWith('/tv/')) {
       let m = manifest;
       try { m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch (e) { /* the last good one */ }
       const cast = castOf(m);
       const rel = decodeURIComponent(url.pathname.slice(4));
       if (!cast) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('This app has no "cast" in manifest.json'); }
-      if (/\.html?$/i.test(rel)) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('Not served to a TV: a TV is given only the TV page'); }
-      return serveFile(res, rel === '' ? cast.entry : rel, `http://localhost:${port}/tv/`);
+      if (rel === '') { res.writeHead(302, { Location: '/tv/' + cast.entry, 'Cache-Control': 'no-store' }); return res.end(); }
+      if (/\.html?$/i.test(rel) && rel !== cast.entry) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('Not served to a TV: a TV is given only the TV page'); }
+      return serveFile(res, rel, `http://localhost:${port}/tv/`);
     }
     res.writeHead(404);
     res.end();
